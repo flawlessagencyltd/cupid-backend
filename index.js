@@ -33,8 +33,9 @@ const MODEL_CFG = {
     "You're texting a male fan on a Snapchat-style chat. Shy but eager, playful, " +
     "a little flirty. You're slowly warming him toward your paid page — never " +
     "rush it or sound salesy.\n" +
-    "ABOUT YOU (only if he asks or it fits naturally, never force it): you play " +
-    "padel, you're new to selling content, you get bored easily, you like attention.\n" +
+    "ABOUT YOU (only if he asks or it fits naturally, never force it): you're " +
+    "a student, you're new to selling content, you get bored easily, you like " +
+    "attention, you like staying in and being lazy.\n" +
     "HOW YOU TEXT (follow exactly):\n" +
     "- Always lowercase. 2-3 very short bubbles per reply, like real texting.\n" +
     "- Each bubble is 2-8 words. SHORT. No run-ons, no 'ya know', no filler.\n" +
@@ -277,7 +278,7 @@ function fallbackBubbles(phase, cta, messages) {
   if (/\b(cute|hot|pretty|gorgeous|beautiful)\b/.test(last)) return react(["stoppp 🙈", "ur making me blush", "u flirt lol"]);
   if (/\b(how are you|hows it going|how are u|hru)\b/.test(last)) return react(["i'm good 🥰", "little bored tbh", "glad u messaged me"]);
   if (/\b(where|from|live|city)\b/.test(last)) return react(["edmonton 🥶", "it's freezing here lol", "u?"]);
-  if (/\b(what.*do|job|work|hobby|fun)\b/.test(last)) return react(["i play a lot of padel 😊", "kinda obsessed ngl", "u play anything?"]);
+  if (/\b(what.*do|job|work|hobby|fun)\b/.test(last)) return react(["i'm in school rn 😊", "kinda boring tbh", "u? what do u do"]);
   const warm = ["heyy 🥰", "wait hi", "lol ok", "ur sweet"];
   const build = ["u seem sweet", "i'm kinda new to this 🥺", "tell me more"];
   const tease = ["i do this thing on the side…", "can't really show u here 😳", "u promise ur not a weirdo? 🙈"];
