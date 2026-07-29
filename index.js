@@ -226,12 +226,18 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   }
   if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA, messages);
 
-  // CTA: only append the canned link bubble if Lori didn't already drop it
+  // CTA: guarantee the link drops exactly once.
+  // - If Lori already included the link herself: do nothing.
+  // - If she teased the trial but no link: append a short link-only bubble.
+  // - Otherwise: append the full canned pitch with the link.
   if (wantCTA) {
-    const alreadyLinked = bubbles.some((x) =>
+    const hasLink = bubbles.some((x) =>
       x.includes(MODEL_CFG.ofLink) || /clickfor\.vip|mirakensleyu/i.test(x));
-    if (!alreadyLinked) {
-      bubbles.push(`okay so… i made a page just for u 👀 ${MODEL_CFG.ofLink} free trial first no stress 💕`);
+    if (!hasLink) {
+      const teasedTrial = bubbles.some((x) => /free trial/i.test(x));
+      bubbles.push(teasedTrial
+        ? `it's here 👀 ${MODEL_CFG.ofLink}`
+        : `okay so… i made a page just for u 👀 ${MODEL_CFG.ofLink} free trial first no stress 💕`);
     }
   }
 
