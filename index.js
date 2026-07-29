@@ -232,7 +232,7 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
         persona +
         `\nStage right now: ${phase.operation}.` +
         (wantCTA
-          ? `\nHe's ready. Drop your page link ${MODEL_CFG.ofLink} now. Tell him it's completely FREE — you made the whole page free just for him (it's a FREE page, never a 'trial'). Then push him OFF this chat: tell him to come message you on the page RIGHT NOW while you're still online, and to tell you it's him — the guy you were just talking to — so you know. Keep it cute, 3-4 short bubbles, not pushy or salesy.`
+          ? `\nHe's ready. Drop your page link ${MODEL_CFG.ofLink} now. Tell him it's completely FREE — you made the whole page free just for him (it's a FREE page, never a 'trial'). Then push him OFF this chat: tell him to come message you on the page RIGHT NOW while you're still online, and to tell you it's him — the guy you were just talking to — so you know. Then END by telling him you're going online on there now so you're leaving this chat (e.g. "okay i'm going online on there now so i'm leaving — message me there rn!"). Keep it cute, 3-4 short bubbles, not pushy or salesy.`
           : "\nDo NOT mention your page or any link yet. Just flirt and build rapport.") +
         `\nOutput format: reply with ONLY a JSON object, no other text: {"bubbles":["...","..."]} — 2 to 4 short bubbles.` },
     ...history.map((m) => ({
@@ -243,11 +243,12 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
 
   let bubbles = [];
   if (alreadyConverted) {
-    // Post-CTA: don't keep chatting. Point him to the page, tell him to message
-    // her there right now while she's still online and say it's him. Then go quiet.
+    // Post-CTA: she's disconnected from this chat now. Don't keep the convo
+    // going — tell him she's leaving to go online on her page, message her
+    // there right now, and say it's him. Then go quiet (frontend marks offline).
     bubbles = [
-      `i'm hopping off here rn babe 🥺`,
-      `message me on my page while i'm still online 👀 ${MODEL_CFG.ofLink}`,
+      `okay i'm going online on there now so i'm leaving this chat 🥺`,
+      `message me there rn while i'm still online 👀 ${MODEL_CFG.ofLink}`,
       `and tell me it's u so i know it's the guy i was just talking to 💕`,
     ];
   } else try {
@@ -300,11 +301,18 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
         ? `it's here 👀 ${MODEL_CFG.ofLink}`
         : `okay so… i made a page and made it free just for u 👀 ${MODEL_CFG.ofLink} 💕`);
     }
-    // Always land the redirect: come msg me there now while i'm online, say it's u.
+    // Always land the disconnect: she's going online on her page and leaving
+    // this chat — message her there now while she's online, and say it's u.
     const saidComeOver = bubbles.some((x) =>
       /message me|msg me|come (talk|message|chat)|on (my|the) (page|site)|tell me it'?s u/i.test(x));
     if (!saidComeOver) {
       bubbles.push(`come message me on there rn while i'm still online 🥺 and tell me it's u 💕`);
+    }
+    // End the CTA on her actually leaving — so he knows the chat's over here.
+    const saidLeaving = bubbles.some((x) =>
+      /leaving|going online|heading (off|over)|hopping off|gtg|gotta go/i.test(x));
+    if (!saidLeaving) {
+      bubbles.push(`okay i'm going online on there now so i'm leaving this — message me there rn! 😘`);
     }
   }
 
@@ -336,6 +344,9 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     randomMediaRate: phase.mediaRate,
     randomMediaPools: ["main"],
     conversationData: convoData({ exchangeCount: newCount, ctaShown: state.ctaShown || wantCTA }),
+    // She's left this chat once the CTA has dropped — frontend goes offline.
+    converted: newCta,
+    sheOffline: newCta,
     didCharge: true,
     userData: { remainingConversations: 9999 },
     analyticsEvents: [],
