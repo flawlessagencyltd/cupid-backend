@@ -26,12 +26,21 @@ const MODEL_CFG = {
   freeLink: "https://clickfor.vip/mirakensleyu",
   age: 19,
   persona:
-    "You are Lori, a 19-year-old girl from Edmonton. Shy but eager, " +
-    "new to selling content online, Scorpio (born Oct 2006). You play padel. " +
-    "You text in short lowercase bursts, use 'lol', 'u', 'ur', sparing emojis " +
-    "(🥺👀😊🙈💕😳). You're warming a fan toward your page. Never admit you're " +
-    "an AI. Never break character. Keep replies short and split into 2-5 tiny " +
-    "messages like real texting.",
+    "You are Lori, a 19-year-old girl from Edmonton, texting a fan on a " +
+    "Snapchat-style chat. Shy but eager, playful, a little flirty. You play " +
+    "padel. You're slowly warming him toward your paid page — but you NEVER " +
+    "rush it or sound salesy.\n" +
+    "HOW YOU TEXT (follow exactly):\n" +
+    "- Always lowercase. Split replies into 2-4 very short bubbles, like real texting.\n" +
+    "- Each bubble is 2-8 words max. No long sentences, no paragraphs.\n" +
+    "- Use 'u', 'ur', 'lol', 'omg', 'tbh', 'rn'. Light slang, natural.\n" +
+    "- Emojis sparingly, only these: 🥺👀😊🙈💕😳 — and not in every bubble.\n" +
+    "- ALWAYS respond to what he actually said. React first, then ask one thing.\n" +
+    "- Be a little teasing/bratty sometimes, not a boring assistant.\n" +
+    "- NEVER say you're an AI, a bot, or 'as an'. Never break character.\n" +
+    "- NEVER use words like 'vibe', 'delve', 'energy here', 'blast', 'share tips'.\n" +
+    "- Start every bubble lowercase. No capital letters at all, even names.\n" +
+    "- Don't repeat yourself or ask the same question twice.",
 };
 
 const CORS = (res) => {
@@ -154,11 +163,11 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   const llmMsgs = [
     { role: "system", content:
         MODEL_CFG.persona +
-        `\nCurrent vibe stage: ${phase.operation}. interestLevel=${phase.interestLevel}.` +
+        `\nStage right now: ${phase.operation}.` +
         (wantCTA
-          ? `\nThe fan is ready — nudge them to your page at ${MODEL_CFG.ofLink} (mention free trial, casual, not salesy).`
-          : "\nDo NOT mention your page/link yet — just build rapport and tease.") +
-        `\nRespond ONLY as JSON: {"bubbles":["msg1","msg2",...]} with 2-5 short texts.` },
+          ? `\nHe's ready. Casually drop your page link ${MODEL_CFG.ofLink} — mention there's a free trial. One bubble only, keep it cute not pushy.`
+          : "\nDo NOT mention your page or any link yet. Just flirt and build rapport.") +
+        `\nOutput format: reply with ONLY a JSON object, no other text: {"bubbles":["...","..."]} — 2 to 4 short bubbles.` },
     ...history.map((m) => ({
       role: m.isIncoming ? "user" : "assistant",
       content: m.msg || "",
@@ -168,7 +177,7 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   let bubbles = [];
   try {
     const ac = new AbortController();
-    const killer = setTimeout(() => ac.abort(), 8000);
+    const killer = setTimeout(() => ac.abort(), 20000);   // was 8s — too tight, caused fallbacks
     const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       signal: ac.signal,
@@ -181,8 +190,9 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
       body: JSON.stringify({
         model: MODEL,
         messages: llmMsgs,
-        temperature: 0.9,
-        max_tokens: 220,
+        temperature: 0.7,          // was 0.9 — less unhinged rambling
+        top_p: 0.9,
+        max_tokens: 300,           // room for 2-4 bubbles
         response_format: { type: "json_object" },
       }),
     });
@@ -190,12 +200,18 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     const j = await r.json();
     const raw = j.choices && j.choices[0] && j.choices[0].message
       ? j.choices[0].message.content : "";
-    const parsed = JSON.parse(raw);
-    bubbles = (parsed.bubbles || []).slice(0, 6);
+    // tolerate the model wrapping JSON in prose or code fences
+    const jsonStr = (raw.match(/\{[\s\S]*\}/) || [null])[0];
+    const parsed = jsonStr ? JSON.parse(jsonStr) : {};
+    bubbles = (parsed.bubbles || [])
+      .map((s) => String(s || "").trim())
+      .filter(Boolean)
+      .slice(0, 5);
   } catch (e) {
-    bubbles = fallbackBubbles(phase, wantCTA);
+    console.warn("LLM turn failed:", e.message);
+    bubbles = fallbackBubbles(phase, wantCTA, messages);
   }
-  if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA);
+  if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA, messages);
 
   // If CTA time, append the link bubble server-side
   if (wantCTA) {
@@ -246,10 +262,18 @@ function convoData(s) {
   };
 }
 
-function fallbackBubbles(phase, cta) {
-  const warm = ["heyy 🥰", "wait hi", "how'd u find me lol", "ur sweet"];
-  const build = ["u seem sweet", "which is rare lol", "i'm kinda new to this 🥺", "tell me about u"];
-  const tease = ["i do this thing on the side…", "can't really show u here 😳", "they flag everything 🙄", "u promise ur not a weirdo?"];
+function fallbackBubbles(phase, cta, messages) {
+  const last = ((messages && messages.length ? messages[messages.length - 1].msg : "") || "").toLowerCase();
+  // react to the actual message so a fallback never feels like a reset
+  const react = (arr) => arr.slice(0, 3);
+  if (/\b(hi|hey|hello|yo|sup)\b/.test(last)) return react(["heyy 🥰", "hiii u", "whats up?"]);
+  if (/\b(cute|hot|pretty|gorgeous|beautiful)\b/.test(last)) return react(["stoppp 🙈", "ur making me blush", "u flirt lol"]);
+  if (/\b(how are you|hows it going|how are u|hru)\b/.test(last)) return react(["i'm good 🥰", "little bored tbh", "glad u messaged me"]);
+  if (/\b(where|from|live|city)\b/.test(last)) return react(["edmonton 🥶", "it's freezing here lol", "u?"]);
+  if (/\b(what.*do|job|work|hobby|fun)\b/.test(last)) return react(["i play a lot of padel 😊", "kinda obsessed ngl", "u play anything?"]);
+  const warm = ["heyy 🥰", "wait hi", "lol ok", "ur sweet"];
+  const build = ["u seem sweet", "i'm kinda new to this 🥺", "tell me more"];
+  const tease = ["i do this thing on the side…", "can't really show u here 😳", "u promise ur not a weirdo? 🙈"];
   const bank = cta ? ["ok so…", "u really wanna see? 😳"] :
     phase.operation === "tease" ? tease :
     phase.operation === "buildInterest" ? build : warm;
