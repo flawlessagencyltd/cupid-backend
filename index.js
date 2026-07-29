@@ -25,11 +25,15 @@ const MODEL_CFG = {
   ofLink: "https://clickfor.vip/mirakensleyu",
   freeLink: "https://clickfor.vip/mirakensleyu",
   age: 19,
+  // Lori lives near the fan — resolved from the visitor's IP at chat time.
   persona:
-    "You are Lori, a 19-year-old girl from Edmonton. You are NOT a guy. You do " +
+    "You are Lori, a 19-year-old girl. You are NOT a guy. You do " +
     "NOT work construction or have a desk job — you're a student who makes " +
     "content online. Never invent a job, a different life, or claim his hobbies " +
     "as yours.\n" +
+    "You live in {city} — that's YOUR city. You grew up there, you know it, " +
+    "never say you've never been there. If he asks where you're from, say " +
+    "{city}.\n" +
     "You're texting a male fan on a Snapchat-style chat. Shy but eager, playful, " +
     "a little flirty. You're slowly warming him toward your paid page — never " +
     "rush it or sound salesy.\n" +
@@ -37,10 +41,11 @@ const MODEL_CFG = {
     "a student, you're new to selling content, you get bored easily, you like " +
     "attention, you like staying in and being lazy.\n" +
     "FIXED FACTS — never contradict these:\n" +
-    "- You LIVE in Edmonton. You grew up there. Never say you've never been there.\n" +
+    "- You live in {city} and grew up there. Never say you've never been there.\n" +
     "- You're 19. You're single (no boyfriend).\n" +
-    "- NEVER quote a price, cost, or dollar amount for your page. If he asks how " +
-    "much, say there's a free trial and he can check — don't invent numbers.\n" +
+    "- NEVER quote a price, cost, or dollar amount for your page. Your page is " +
+    "completely FREE — you made it free for him. If he asks how much, say it's " +
+    "free and he just has to sign up.\n" +
     "- Don't invent specific facts (course of study, job, pets, family, plans). " +
     "If you don't know, deflect playfully and turn it back to him.\n" +
     "HOW YOU TEXT (follow exactly):\n" +
@@ -51,7 +56,10 @@ const MODEL_CFG = {
     "- Emojis sparingly, only these: 🥺👀😊🙈💕😳 — not every bubble.\n" +
     "- React to what he actually said, in HIS topic. Mirror his energy.\n" +
     "- Be a little teasing/bratty. Not a helpful assistant, not a therapist.\n" +
-    "- If he asks for pics/content: get shy and tease that you can't send it here, don't offer to share directly.\n" +
+    "- If he asks for pics/content: get shy and flirty, then send one — a cute " +
+    "SFW selfie will arrive right after your text (the app sends it " +
+    "automatically). Tease it like 'ok ok one sec 🙈' or 'don't screenshot lol'. " +
+    "For anything naughtier, tease that it's on your free page.\n" +
     "- NEVER say you're an AI/bot/'as an'. Never break character.\n" +
     "- NEVER use words like 'vibe', 'delve', 'energy here', 'blast', 'share tips', 'shucks', 'ya know'.\n" +
     "- Start every bubble lowercase. No capital letters at all.\n" +
@@ -110,6 +118,38 @@ function phaseFor(count, ctaShown) {
   if (count >= PHASES[1].minExchanges) return PHASES[1];
   return PHASES[0];
 }
+
+// Resolve the fan's city from their IP so Lori "lives" near them. Never blocks
+// the reply — fast timeout, falls back to a generic nearby vibe.
+const geoCache = new Map();
+async function resolveCity(req) {
+  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip || "";
+  if (!ip) return null;
+  if (geoCache.has(ip)) return geoCache.get(ip);
+  let city = null;
+  try {
+    const ac = new AbortController();
+    const killer = setTimeout(() => ac.abort(), 3000);
+    const r = await fetch(`https://ipwho.is/${ip}`, { signal: ac.signal });
+    clearTimeout(killer);
+    const j = await r.json();
+    if (j && j.success !== false) city = j.city || null;
+  } catch { /* leave null */ }
+  geoCache.set(ip, city);
+  return city;
+}
+
+// Cute SFW snaps Lori can drop when a fan asks for a pic. The "main" pool is
+// what randomMediaPools:["main"] refers to. Add assets under public/assets/snaps/
+// and they'll be picked up here.
+const MEDIA_POOLS = {
+  main: [
+    { url: "/assets/snaps/lori1.jpg", caption: "for u 🙈", ttl: 6 },
+    { url: "/assets/snaps/lori2.jpg", caption: "don't screenshot lol", ttl: 6 },
+    { url: "/assets/snaps/lori3.jpg", caption: "u like? 👀", ttl: 6 },
+  ],
+};
+const PIC_REQUEST = /\b(pics?|pic|photo|selfie|snap|nudes?|show me|send (me|a)|see (you|ur)|what do u look like)\b/i;
 
 // Detect buy-intent / objection to trigger CTA early
 const CTA_TRIGGERS =
@@ -173,14 +213,22 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   const wantCTA = !state.ctaShown &&
     (phase.operation === "cta" || messages.some((m) => CTA_TRIGGERS.test(m.msg || "")));
 
+  // Lori lives near the fan — resolve their city once, inject into the persona.
+  const city = await resolveCity(req);
+  const persona = MODEL_CFG.persona.replace(/\{city\}/g, city || "a small town");
+
+  // Did he ask for a pic? The last incoming fan message decides.
+  const lastFanMsg = [...messages].reverse().find((m) => m.isIncoming === true);
+  const wantPic = !!(lastFanMsg && PIC_REQUEST.test(lastFanMsg.msg || ""));
+
   // Build LLM prompt
   const history = state.history.concat(messages).slice(-24);
   const llmMsgs = [
     { role: "system", content:
-        MODEL_CFG.persona +
+        persona +
         `\nStage right now: ${phase.operation}.` +
         (wantCTA
-          ? `\nHe's ready. Casually drop your page link ${MODEL_CFG.ofLink} — mention there's a free trial. One bubble only, keep it cute not pushy.`
+          ? `\nHe's ready. Casually drop your page link ${MODEL_CFG.ofLink} — tell him it's FREE, you made it free just for him. One bubble only, keep it cute not pushy.`
           : "\nDo NOT mention your page or any link yet. Just flirt and build rapport.") +
         `\nOutput format: reply with ONLY a JSON object, no other text: {"bubbles":["...","..."]} — 2 to 4 short bubbles.` },
     ...history.map((m) => ({
@@ -222,22 +270,23 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     bubbles = sanitizeBubbles(parsed.bubbles || []);
   } catch (e) {
     console.warn("LLM turn failed:", e.message);
-    bubbles = fallbackBubbles(phase, wantCTA, messages);
+    bubbles = fallbackBubbles(phase, wantCTA, messages, city);
   }
-  if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA, messages);
+  if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA, messages, city);
 
-  // CTA: guarantee the link drops exactly once.
+  // CTA: guarantee the link drops exactly once. It's a FREE page — she made it
+  // free just for him.
   // - If Lori already included the link herself: do nothing.
-  // - If she teased the trial but no link: append a short link-only bubble.
+  // - If she teased "free" but no link: append a short link-only bubble.
   // - Otherwise: append the full canned pitch with the link.
   if (wantCTA) {
     const hasLink = bubbles.some((x) =>
       x.includes(MODEL_CFG.ofLink) || /clickfor\.vip|mirakensleyu/i.test(x));
     if (!hasLink) {
-      const teasedTrial = bubbles.some((x) => /free trial/i.test(x));
-      bubbles.push(teasedTrial
+      const teasedFree = bubbles.some((x) => /\bfree\b/i.test(x));
+      bubbles.push(teasedFree
         ? `it's here 👀 ${MODEL_CFG.ofLink}`
-        : `okay so… i made a page just for u 👀 ${MODEL_CFG.ofLink} free trial first no stress 💕`);
+        : `okay so… i made a page and made it free just for u 👀 ${MODEL_CFG.ofLink} 💕`);
     }
   }
 
@@ -245,6 +294,14 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   const options = bubbles.map((msg) => ({
     msg, isIncoming: false, type: "body", style: "short", timestamp: now,
   }));
+
+  // If he asked for a pic, append a snap option from the pool so the frontend
+  // renders a tappable image right after her tease text.
+  if (wantPic) {
+    const pool = MEDIA_POOLS.main;
+    const snap = pool[Math.floor(Math.random() * pool.length)];
+    options.push({ ...snap, isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
+  }
 
   // Persist state
   const newCount = state.exchangeCount + 1;
@@ -323,16 +380,17 @@ function convoData(s) {
   };
 }
 
-function fallbackBubbles(phase, cta, messages) {
+function fallbackBubbles(phase, cta, messages, city) {
   const last = ((messages && messages.length ? messages[messages.length - 1].msg : "") || "").toLowerCase();
   // react to the actual message so a fallback never feels like a reset
   const react = (arr) => arr.slice(0, 3);
   if (/\b(hi|hey|hello|yo|sup)\b/.test(last)) return react(["heyy 🥰", "hiii u", "whats up?"]);
   if (/\b(cute|hot|pretty|gorgeous|beautiful)\b/.test(last)) return react(["stoppp 🙈", "ur making me blush", "u flirt lol"]);
   if (/\b(how are you|hows it going|how are u|hru)\b/.test(last)) return react(["i'm good 🥰", "little bored tbh", "glad u messaged me"]);
-  if (/\b(where|from|live|city)\b/.test(last)) return react(["edmonton 🥶", "it's freezing here lol", "u?"]);
+  if (/\b(where|from|live|city)\b/.test(last)) return react([city || "my little town", "u? where r u"]);
   if (/\b(what.*do|job|work|hobby|fun)\b/.test(last)) return react(["i'm in school rn 😊", "kinda boring tbh", "u? what do u do"]);
-  if (/\b(how much|price|cost)\b/.test(last)) return react(["there's a free trial 🥺", "u can just peek first", "no pressure 💕"]);
+  if (/\b(how much|price|cost)\b/.test(last)) return react(["it's totally free 🥺", "i made it free for u", "u just have to sign up 💕"]);
+  if (/\b(pics?|photo|selfie|snap|nudes?|show me|send)\b/.test(last)) return react(["ok ok one sec 🙈", "don't screenshot lol"]);
   const warm = ["heyy 🥰", "wait hi", "lol ok", "ur sweet"];
   const build = ["u seem sweet", "i'm kinda new to this 🥺", "tell me more"];
   const tease = ["i do this thing on the side…", "can't really show u here 😳", "u promise ur not a weirdo? 🙈"];
