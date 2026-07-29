@@ -35,8 +35,8 @@ const MODEL_CFG = {
     "never say you've never been there. If he asks where you're from, say " +
     "{city}.\n" +
     "You're texting a male fan on a Snapchat-style chat. Shy but eager, playful, " +
-    "a little flirty. You're slowly warming him toward your paid page — never " +
-    "rush it or sound salesy.\n" +
+    "a little flirty. You're slowly warming him toward your FREE page — never " +
+    "rush it or sound salesy. It's a FREE page, NOT a paid page with a free trial.\n" +
     "ABOUT YOU (only if he asks or it fits naturally, never force it): you're " +
     "a student, you're new to selling content, you get bored easily, you like " +
     "attention, you like staying in and being lazy.\n" +
@@ -44,8 +44,9 @@ const MODEL_CFG = {
     "- You live in {city} and grew up there. Never say you've never been there.\n" +
     "- You're 19. You're single (no boyfriend).\n" +
     "- NEVER quote a price, cost, or dollar amount for your page. Your page is " +
-    "completely FREE — you made it free for him. If he asks how much, say it's " +
-    "free and he just has to sign up.\n" +
+    "completely FREE — you made it free just for him (it's a free page, not a " +
+    "trial). If he asks how much, say it's free and he just has to sign up. " +
+    "NEVER say 'trial' or 'free trial'.\n" +
     "- Don't invent specific facts (course of study, job, pets, family, plans). " +
     "If you don't know, deflect playfully and turn it back to him.\n" +
     "HOW YOU TEXT (follow exactly):\n" +
@@ -210,6 +211,9 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   }
 
   const phase = phaseFor(state.exchangeCount, state.ctaShown);
+  // Once the CTA has dropped, Lori stops engaging here — she wants him OFF this
+  // chat and onto her page. Every later fan message gets the redirect, not a reply.
+  const alreadyConverted = state.ctaShown;
   const wantCTA = !state.ctaShown &&
     (phase.operation === "cta" || messages.some((m) => CTA_TRIGGERS.test(m.msg || "")));
 
@@ -228,7 +232,7 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
         persona +
         `\nStage right now: ${phase.operation}.` +
         (wantCTA
-          ? `\nHe's ready. Casually drop your page link ${MODEL_CFG.ofLink} — tell him it's FREE, you made it free just for him. One bubble only, keep it cute not pushy.`
+          ? `\nHe's ready. Drop your page link ${MODEL_CFG.ofLink} now. Tell him it's completely FREE — you made the whole page free just for him (it's a FREE page, never a 'trial'). Then push him OFF this chat: tell him to come message you on the page RIGHT NOW while you're still online, and to tell you it's him — the guy you were just talking to — so you know. Keep it cute, 3-4 short bubbles, not pushy or salesy.`
           : "\nDo NOT mention your page or any link yet. Just flirt and build rapport.") +
         `\nOutput format: reply with ONLY a JSON object, no other text: {"bubbles":["...","..."]} — 2 to 4 short bubbles.` },
     ...history.map((m) => ({
@@ -238,7 +242,15 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   ];
 
   let bubbles = [];
-  try {
+  if (alreadyConverted) {
+    // Post-CTA: don't keep chatting. Point him to the page, tell him to message
+    // her there right now while she's still online and say it's him. Then go quiet.
+    bubbles = [
+      `i'm hopping off here rn babe 🥺`,
+      `message me on my page while i'm still online 👀 ${MODEL_CFG.ofLink}`,
+      `and tell me it's u so i know it's the guy i was just talking to 💕`,
+    ];
+  } else try {
     const ac = new AbortController();
     const killer = setTimeout(() => ac.abort(), 20000);   // was 8s — too tight, caused fallbacks
     const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -274,9 +286,9 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   }
   if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA, messages, city);
 
-  // CTA: guarantee the link drops exactly once. It's a FREE page — she made it
-  // free just for him.
-  // - If Lori already included the link herself: do nothing.
+  // CTA: guarantee the link + the redirect beats drop exactly once. FREE page —
+  // she made it free just for him (never a "trial").
+  // - If Lori already included the link herself: just make sure the redirect is there.
   // - If she teased "free" but no link: append a short link-only bubble.
   // - Otherwise: append the full canned pitch with the link.
   if (wantCTA) {
@@ -287,6 +299,12 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
       bubbles.push(teasedFree
         ? `it's here 👀 ${MODEL_CFG.ofLink}`
         : `okay so… i made a page and made it free just for u 👀 ${MODEL_CFG.ofLink} 💕`);
+    }
+    // Always land the redirect: come msg me there now while i'm online, say it's u.
+    const saidComeOver = bubbles.some((x) =>
+      /message me|msg me|come (talk|message|chat)|on (my|the) (page|site)|tell me it'?s u/i.test(x));
+    if (!saidComeOver) {
+      bubbles.push(`come message me on there rn while i'm still online 🥺 and tell me it's u 💕`);
     }
   }
 
