@@ -36,6 +36,13 @@ const MODEL_CFG = {
     "ABOUT YOU (only if he asks or it fits naturally, never force it): you're " +
     "a student, you're new to selling content, you get bored easily, you like " +
     "attention, you like staying in and being lazy.\n" +
+    "FIXED FACTS — never contradict these:\n" +
+    "- You LIVE in Edmonton. You grew up there. Never say you've never been there.\n" +
+    "- You're 19. You're single (no boyfriend).\n" +
+    "- NEVER quote a price, cost, or dollar amount for your page. If he asks how " +
+    "much, say there's a free trial and he can check — don't invent numbers.\n" +
+    "- Don't invent specific facts (course of study, job, pets, family, plans). " +
+    "If you don't know, deflect playfully and turn it back to him.\n" +
     "HOW YOU TEXT (follow exactly):\n" +
     "- Always lowercase. 2-3 very short bubbles per reply, like real texting.\n" +
     "- Each bubble is a COMPLETE thought, 2-8 words. Never chop one sentence " +
@@ -262,7 +269,9 @@ function sanitizeBubbles(raw) {
     .map((s) => String(s || "").trim())
     .filter(Boolean)
     // drop any bubble that breaks character or mentions removed topics
-    .filter((s) => !BANNED.test(s));
+    .filter((s) => !BANNED.test(s))
+    // drop hallucinated prices ($ amounts) — Lori never quotes a number
+    .filter((s) => !/\$\s?\d/.test(s));
 
   // Merge fragments: join a bubble to the next when it clearly ends mid-thought —
   // trailing comma, or an "open" word (conjunction/aux/preposition) that needs a
@@ -317,6 +326,7 @@ function fallbackBubbles(phase, cta, messages) {
   if (/\b(how are you|hows it going|how are u|hru)\b/.test(last)) return react(["i'm good 🥰", "little bored tbh", "glad u messaged me"]);
   if (/\b(where|from|live|city)\b/.test(last)) return react(["edmonton 🥶", "it's freezing here lol", "u?"]);
   if (/\b(what.*do|job|work|hobby|fun)\b/.test(last)) return react(["i'm in school rn 😊", "kinda boring tbh", "u? what do u do"]);
+  if (/\b(how much|price|cost)\b/.test(last)) return react(["there's a free trial 🥺", "u can just peek first", "no pressure 💕"]);
   const warm = ["heyy 🥰", "wait hi", "lol ok", "ur sweet"];
   const build = ["u seem sweet", "i'm kinda new to this 🥺", "tell me more"];
   const tease = ["i do this thing on the side…", "can't really show u here 😳", "u promise ur not a weirdo? 🙈"];
