@@ -38,14 +38,15 @@ const MODEL_CFG = {
     "attention, you like staying in and being lazy.\n" +
     "HOW YOU TEXT (follow exactly):\n" +
     "- Always lowercase. 2-3 very short bubbles per reply, like real texting.\n" +
-    "- Each bubble is 2-8 words. SHORT. No run-ons, no 'ya know', no filler.\n" +
+    "- Each bubble is a COMPLETE thought, 2-8 words. Never chop one sentence " +
+    "across bubbles. Never end a bubble on a comma.\n" +
     "- Use 'u', 'ur', 'lol', 'omg', 'tbh', 'rn'. Natural slang.\n" +
     "- Emojis sparingly, only these: 🥺👀😊🙈💕😳 — not every bubble.\n" +
     "- React to what he actually said, in HIS topic. Mirror his energy.\n" +
     "- Be a little teasing/bratty. Not a helpful assistant, not a therapist.\n" +
     "- If he asks for pics/content: get shy and tease that you can't send it here, don't offer to share directly.\n" +
     "- NEVER say you're an AI/bot/'as an'. Never break character.\n" +
-    "- NEVER use words like 'vibe', 'delve', 'energy here', 'blast', 'share tips'.\n" +
+    "- NEVER use words like 'vibe', 'delve', 'energy here', 'blast', 'share tips', 'shucks', 'ya know'.\n" +
     "- Start every bubble lowercase. No capital letters at all.\n" +
     "- Don't repeat yourself, don't ask the same question twice.",
 };
@@ -211,19 +212,20 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     // tolerate the model wrapping JSON in prose or code fences
     const jsonStr = (raw.match(/\{[\s\S]*\}/) || [null])[0];
     const parsed = jsonStr ? JSON.parse(jsonStr) : {};
-    bubbles = (parsed.bubbles || [])
-      .map((s) => String(s || "").trim())
-      .filter(Boolean)
-      .slice(0, 5);
+    bubbles = sanitizeBubbles(parsed.bubbles || []);
   } catch (e) {
     console.warn("LLM turn failed:", e.message);
     bubbles = fallbackBubbles(phase, wantCTA, messages);
   }
   if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA, messages);
 
-  // If CTA time, append the link bubble server-side
+  // CTA: only append the canned link bubble if Lori didn't already drop it
   if (wantCTA) {
-    bubbles.push(`okay so… i made a page just for u 👀 ${MODEL_CFG.ofLink} free trial first no stress 💕`);
+    const alreadyLinked = bubbles.some((x) =>
+      x.includes(MODEL_CFG.ofLink) || /clickfor\.vip|mirakensleyu/i.test(x));
+    if (!alreadyLinked) {
+      bubbles.push(`okay so… i made a page just for u 👀 ${MODEL_CFG.ofLink} free trial first no stress 💕`);
+    }
   }
 
   const now = Date.now() / 1000;
@@ -251,6 +253,42 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     analyticsEvents: [],
   });
 });
+
+// Post-process LLM bubbles: kill character-breaking words, merge comma-fragments,
+// and keep each bubble a complete short thought. Runs on every LLM turn.
+const BANNED = /\b(padel|shucks|delve)\b/i;
+function sanitizeBubbles(raw) {
+  let list = (Array.isArray(raw) ? raw : [])
+    .map((s) => String(s || "").trim())
+    .filter(Boolean)
+    // drop any bubble that breaks character or mentions removed topics
+    .filter((s) => !BANNED.test(s));
+
+  // Merge fragments: join a bubble to the next when it clearly ends mid-thought —
+  // trailing comma, or an "open" word (conjunction/aux/preposition) that needs a
+  // continuation. Cap at one join per bubble so we never chain into a run-on.
+  const OPEN_END = /(,|and|or|but|so|to|i've|i'm|it's|its|the|a|an|of|for|with|that|u|ur|if|when|because|or|is|are|was|think|know)\s*$/i;
+  const merged = [];
+  for (const b of list) {
+    const prev = merged[merged.length - 1];
+    const startsLower = /^[a-z(]/.test(b);
+    if (prev && OPEN_END.test(prev) && startsLower &&
+        (prev + " " + b).length <= 90 && merged.joined !== true) {
+      merged[merged.length - 1] = (prev.replace(/,\s*$/, "") + " " + b).trim();
+      merged.joined = true;   // only one merge per resulting bubble
+    } else {
+      merged.push(b);
+      merged.joined = false;
+    }
+  }
+
+  // Final pass: strip trailing commas, collapse spaces, cap at 4 bubbles,
+  // and drop any over-long bubble that screams rambling.
+  return merged
+    .map((s) => s.replace(/\s+/g, " ").replace(/,\s*$/, "").trim())
+    .filter((s) => s && s.length <= 120)
+    .slice(0, 4);
+}
 
 function convoData(s) {
   const phase = phaseFor(s.exchangeCount, s.ctaShown);
