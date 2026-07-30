@@ -22,6 +22,9 @@ const VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "google/gemini-2.5-f
 // Analyze a fan-sent image → a short, concrete description Lori can react to.
 // imageData: base64 data URL ("data:image/jpeg;base64,...") OR a raw https URL.
 // Returns "" on any failure (we never block the chat over a failed vision call).
+// Returns "__explicit__" when the vision provider REFUSED / content-filtered the
+// image — for an adult-platform chat that almost always means an NSFW pic (dick
+// pic etc.), so Lori should react like she saw something explicit, not confused.
 async function describeFanImage(imageData, apiKey) {
   if (!imageData) return "";
   const imageUrl = /^https?:\/\//.test(imageData)
@@ -54,11 +57,22 @@ async function describeFanImage(imageData, apiKey) {
     clearTimeout(killer);
     const j = await r.json();
     if (!r.ok || j.error) {
-      console.warn("vision upstream", r.status, JSON.stringify(j.error || j).slice(0, 300));
+      const errStr = JSON.stringify(j.error || j).toLowerCase();
+      // 403 / moderation / content-policy / invalid image data → provider filtered it
+      if (r.status === 403 || /moderat|content.?polic|content.?filter|sexual|nsfw|flagged|invalid image/.test(errStr)) {
+        console.warn("vision content-filtered:", errStr.slice(0, 200));
+        return "__explicit__";
+      }
+      console.warn("vision upstream", r.status, errStr.slice(0, 300));
       return "";
     }
     const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
-    return String(txt).replace(/\s+/g, " ").trim().slice(0, 220);
+    const clean = String(txt).replace(/\s+/g, " ").trim().slice(0, 220);
+    // Soft refusal: model completed but declined to describe
+    if (/can'?t (describe|help|identify)|cannot describe|unable to (describe|help)|not able to/i.test(clean)) {
+      return "__explicit__";
+    }
+    return clean;
   } catch (e) {
     console.warn("vision failed:", e.message);
     return "";
@@ -189,17 +203,38 @@ async function resolveCity(req) {
   return city;
 }
 
-// Cute SFW snaps Lori can drop when a fan asks for a pic. The "main" pool is
-// what randomMediaPools:["main"] refers to. Add assets under public/assets/snaps/
-// and they'll be picked up here.
+// Lori's real pics, tiered by escalation. "main" = legacy SFW rotation.
+// casual → early/warm, spicy → as interest builds, verify → proof-she's-real,
+// opener → the first view-once snap of a brand-new convo.
 const MEDIA_POOLS = {
   main: [
     { url: "/assets/snaps/lori1.jpg", caption: "for u 🙈", ttl: 6 },
     { url: "/assets/snaps/lori2.jpg", caption: "don't screenshot lol", ttl: 6 },
     { url: "/assets/snaps/lori3.jpg", caption: "u like? 👀", ttl: 6 },
   ],
+  opener: { url: "/assets/snaps/opener.jpg", caption: "hiii 🥰", ttl: 6 },
+  casual: [
+    { url: "/assets/snaps/casual1.jpg", caption: "me rn lol", ttl: 6 },
+    { url: "/assets/snaps/casual2.jpg", caption: "just chillin", ttl: 6 },
+    { url: "/assets/snaps/casual3.jpg", caption: "bored at home 🙄", ttl: 6 },
+    { url: "/assets/snaps/casual4.jpg", caption: "for u 🙈", ttl: 6 },
+  ],
+  spicy: [
+    { url: "/assets/snaps/spicy1.jpg", caption: "u like? 👀", ttl: 8 },
+    { url: "/assets/snaps/spicy2.jpg", caption: "feeling myself tn", ttl: 8 },
+    { url: "/assets/snaps/spicy3.jpg", caption: "don't screenshot lol", ttl: 8 },
+    { url: "/assets/snaps/spicy4.jpg", caption: "just for u 😘", ttl: 8 },
+    { url: "/assets/snaps/spicy5.jpg", caption: "u drive me crazy 🥵", ttl: 8 },
+  ],
+  verify: [
+    { url: "/assets/snaps/verify1.jpg", caption: "see?? told u i'm real 😌✌️", ttl: 8 },
+    { url: "/assets/snaps/verify2.jpg", caption: "still think i'm fake? 😏", ttl: 8 },
+  ],
 };
 const PIC_REQUEST = /\b(pics?|pic|photo|selfie|snap|nudes?|show me|send (me|a)|see (you|ur)|what do u look like)\b/i;
+
+// Fan doubts she's real → drop a verification snap.
+const VERIFY_REQUEST = /\b(fake|bot|robot|ai\b|not real|are? u real|r u real|catfish|scam|prove it|proof|really you|actually real|you'?re fake|this is fake)\b/i;
 
 // Detect buy-intent / objection to trigger CTA early
 const CTA_TRIGGERS =
@@ -282,7 +317,10 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     : "";
 
   // If he sent a pic, tell Lori what she's looking at so she reacts to the real thing.
-  const imageNote = fanImageDesc
+  // __explicit__ = the vision model content-filtered it → almost certainly an NSFW pic.
+  const imageNote = fanImageDesc === "__explicit__"
+    ? `\nIMPORTANT: He just sent you an explicit NSFW photo of himself (a dick pic or nude). React like a flirty adult woman who is INTO it — tease him, compliment him, be a little turned on, maybe playfully scold him for being forward. Match the persona's warmth and emojis. Do NOT act confused or say you can't see it.`
+    : fanImageDesc
     ? `\nIMPORTANT: He just sent you a photo. It shows: ${fanImageDesc} React naturally to THIS specific photo — compliment it, tease him, or comment on what's actually in it. Do NOT pretend you can't see it.`
     : (fanImage ? `\nHe just sent you a photo but you can't quite make it out. React playfully like you're intrigued.` : "");
 
@@ -383,12 +421,21 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     msg, isIncoming: false, type: "body", style: "short", timestamp: now,
   }));
 
-  // If he asked for a pic, append a snap option from the pool so the frontend
-  // renders a tappable image right after her tease text.
-  if (wantPic) {
-    const pool = MEDIA_POOLS.main;
-    const snap = pool[Math.floor(Math.random() * pool.length)];
-    options.push({ ...snap, isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
+  // Snap beats — pick the right photo for where the convo is:
+  //  1. verify: he called her fake/bot → proof pic (beats everything else)
+  //  2. opener: brand-new convo → her first hello snap
+  //  3. pic request: escalate casual early → spicy as exchanges build
+  const wantVerify = !!(lastFanMsg && VERIFY_REQUEST.test(lastFanMsg.msg || ""));
+  const isFirstReply = state.exchangeCount === 0 && !wantVerify;
+
+  const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+  if (wantVerify) {
+    options.push({ ...pick(MEDIA_POOLS.verify), isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
+  } else if (isFirstReply) {
+    options.push({ ...MEDIA_POOLS.opener, isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
+  } else if (wantPic) {
+    const tier = state.exchangeCount >= PHASES[1].minExchanges ? MEDIA_POOLS.spicy : MEDIA_POOLS.casual;
+    options.push({ ...pick(tier), isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
   }
 
   // Persist state
