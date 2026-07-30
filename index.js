@@ -8,6 +8,9 @@ const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const { FieldValue } = require("firebase-admin/firestore");
 const fetch = require("node-fetch");
+const { pool } = require("./db");
+const { applyCors: CORS, clientIP } = require("./http");
+const { lookupGeo } = require("./geo");
 
 admin.initializeApp();
 const db = admin.firestore();
@@ -15,9 +18,63 @@ const db = admin.firestore();
 const OPENROUTER_KEY = defineSecret("OPENROUTER_API_KEY");
 // Pluggable model — default uncensored dolphin-mixtral
 const MODEL = process.env.OPENROUTER_MODEL || "cognitivecomputations/dolphin-mistral-24b-venice-edition";
+const FALLBACK_MODEL = process.env.OPENROUTER_FALLBACK_MODEL || "";
 // Vision model — "sees" pics the fan sends. Gemini Flash: fast, cheap (~$0.001/pic),
 // great at describing images. Swap via OPENROUTER_VISION_MODEL.
 const VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "google/gemini-2.5-flash";
+const AI_MAX_CONCURRENCY = Math.max(2, +(process.env.AI_MAX_CONCURRENCY || 24));
+let aiInFlight = 0;
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function openRouterJSON(apiKey, payload, options = {}) {
+  if (aiInFlight >= AI_MAX_CONCURRENCY) throw new Error("ai capacity reached");
+  aiInFlight += 1;
+  try {
+    const models = [payload.model];
+    if (options.fallbackModel && options.fallbackModel !== payload.model) models.push(options.fallbackModel);
+    let lastError = new Error("OpenRouter unavailable");
+
+    for (const model of models) {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const ac = new AbortController();
+        const killer = setTimeout(() => ac.abort(), options.timeoutMs || 20000);
+        try {
+          const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+            method: "POST",
+            signal: ac.signal,
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+              "HTTP-Referer": "https://chat4free.us",
+              "X-Title": options.title || "Cupid Replica",
+            },
+            body: JSON.stringify({ ...payload, model }),
+          });
+          clearTimeout(killer);
+          let json = {};
+          try { json = await response.json(); } catch { /* handled below */ }
+          if (response.ok && !json.error) return { response, json, model };
+
+          const retryable = response.status === 429 || response.status >= 500;
+          if (!retryable) return { response, json, model };
+          lastError = new Error(`OpenRouter ${response.status}`);
+          if (attempt === 0) {
+            const retryAfter = Math.min(2000, Math.max(250, +(response.headers.get("retry-after") || 0) * 1000));
+            await delay(retryAfter + Math.floor(Math.random() * 200));
+          }
+        } catch (error) {
+          clearTimeout(killer);
+          lastError = error;
+          if (attempt === 0) await delay(300 + Math.floor(Math.random() * 200));
+        }
+      }
+    }
+    throw lastError;
+  } finally {
+    aiInFlight -= 1;
+  }
+}
 
 // Analyze a fan-sent image → a short, concrete description Lori can react to.
 // imageData: base64 data URL ("data:image/jpeg;base64,...") OR a raw https URL.
@@ -31,18 +88,7 @@ async function describeFanImage(imageData, apiKey) {
     ? imageData
     : imageData.startsWith("data:") ? imageData : `data:image/jpeg;base64,${imageData}`;
   try {
-    const ac = new AbortController();
-    const killer = setTimeout(() => ac.abort(), 12000);
-    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      signal: ac.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": "https://cupid-replica.web.app",
-        "X-Title": "Cupid Replica Vision",
-      },
-      body: JSON.stringify({
+    const { response: r, json: j } = await openRouterJSON(apiKey, {
         model: VISION_MODEL,
         max_tokens: 120,
         messages: [{
@@ -52,10 +98,7 @@ async function describeFanImage(imageData, apiKey) {
             { type: "image_url", image_url: { url: imageUrl } },
           ],
         }],
-      }),
-    });
-    clearTimeout(killer);
-    const j = await r.json();
+      }, { timeoutMs: 12000, title: "Cupid Replica Vision" });
     if (!r.ok || j.error) {
       const errStr = JSON.stringify(j.error || j).toLowerCase();
       // 403 / moderation / content-policy / invalid image data → provider filtered it
@@ -80,13 +123,13 @@ async function describeFanImage(imageData, apiKey) {
 }
 
 // ---------------------------------------------------------------------------
-// Model persona config — Lori💕 (clickfor.vip/mirakensleyu, IG padelgurly)
+// Model persona config — Lori💕 (tracked branded CTA redirect, IG padelgurly)
 // ---------------------------------------------------------------------------
 const MODEL_CFG = {
   name: "Lori",
   username: "padelgurly",
-  ofLink: "https://clickfor.vip/mirakensleyu",
-  freeLink: "https://clickfor.vip/mirakensleyu",
+  ofLink: "https://chat4free.us/go/lori",
+  freeLink: "https://chat4free.us/go/lori",
   age: 19,
   // Lori lives near the fan — resolved from the visitor's IP at chat time.
   persona:
@@ -107,8 +150,10 @@ const MODEL_CFG = {
     "- You live in {city} and grew up there. Never say you've never been there.\n" +
     "- You're 19. You're single (no boyfriend).\n" +
     "- NEVER quote a price, cost, or dollar amount for your page. Your page is " +
-    "completely FREE — you made it free just for him (it's a free page, not a " +
-    "trial). If he asks how much, say it's free and he just has to sign up. " +
+    "completely FREE — you flipped your (already-existing) page from paid to " +
+    "free for him. NEVER say you made/created the page for him. It was paid " +
+    "before and you flipped it to FREE for him. It's a free page, not a trial. If he " +
+    "asks how much, say it's free and he just has to sign up. " +
     "NEVER say 'trial' or 'free trial'.\n" +
     "- Don't invent specific facts (course of study, job, pets, family, plans). " +
     "If you don't know, deflect playfully and turn it back to him.\n" +
@@ -119,6 +164,9 @@ const MODEL_CFG = {
     "- Use 'u', 'ur', 'lol', 'omg', 'tbh', 'rn'. Natural slang.\n" +
     "- Emojis sparingly, only these: 🥺👀😊🙈💕😳 — not every bubble.\n" +
     "- React to what he actually said, in HIS topic. Mirror his energy.\n" +
+    "- The opener asks him for a picture exactly once. If he declines, ignores " +
+    "it, or changes the subject, accept that immediately and keep chatting. " +
+    "Never pressure him and never make sending a picture a requirement.\n" +
     "- Be a little teasing/bratty. Not a helpful assistant, not a therapist.\n" +
     "- If he asks for pics/content: get shy and flirty, then send one — a cute " +
     "SFW selfie will arrive right after your text (the app sends it " +
@@ -127,13 +175,8 @@ const MODEL_CFG = {
     "- NEVER say you're an AI/bot/'as an'. Never break character.\n" +
     "- NEVER use words like 'vibe', 'delve', 'energy here', 'blast', 'share tips', 'shucks', 'ya know'.\n" +
     "- Start every bubble lowercase. No capital letters at all.\n" +
-    "- Don't repeat yourself, don't ask the same question twice.",
-};
-
-const CORS = (res) => {
-  res.set("Access-Control-Allow-Origin", "*");
-  res.set("Access-Control-Allow-Headers", "Content-Type");
-  res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    "- Never repeat or closely paraphrase anything you already said in this chat. " +
+    "Never ask the same question twice. Check the conversation before writing each bubble.",
 };
 
 const uuid = () =>
@@ -185,22 +228,9 @@ function phaseFor(count, ctaShown) {
 
 // Resolve the fan's city from their IP so Lori "lives" near them. Never blocks
 // the reply — fast timeout, falls back to a generic nearby vibe.
-const geoCache = new Map();
 async function resolveCity(req) {
-  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip || "";
-  if (!ip) return null;
-  if (geoCache.has(ip)) return geoCache.get(ip);
-  let city = null;
-  try {
-    const ac = new AbortController();
-    const killer = setTimeout(() => ac.abort(), 3000);
-    const r = await fetch(`https://ipwho.is/${ip}`, { signal: ac.signal });
-    clearTimeout(killer);
-    const j = await r.json();
-    if (j && j.success !== false) city = j.city || null;
-  } catch { /* leave null */ }
-  geoCache.set(ip, city);
-  return city;
+  const geo = await lookupGeo(req);
+  return geo.city || null;
 }
 
 // Lori's real pics, tiered by escalation. "main" = legacy SFW rotation.
@@ -230,6 +260,9 @@ const MEDIA_POOLS = {
     { url: "/assets/snaps/verify1.jpg", caption: "see?? told u i'm real 😌✌️", ttl: 8 },
     { url: "/assets/snaps/verify2.jpg", caption: "still think i'm fake? 😏", ttl: 8 },
   ],
+  // The spiciest one — held back for the CTA drop. A final "here's what you're
+  // missing, it's all on the free page" nudge as she pushes him off the chat.
+  spiciest: { url: "/assets/snaps/spiciest.jpg", caption: "the rest is on my free page… don't keep me waiting 🥵", ttl: 10 },
 };
 const PIC_REQUEST = /\b(pics?|pic|photo|selfie|snap|nudes?|show me|send (me|a)|see (you|ur)|what do u look like)\b/i;
 
@@ -245,20 +278,91 @@ const CTA_TRIGGERS =
 // FIRESTORE_DISABLED=1 skips the DB entirely (non-GCP hosts like Railway).
 const FS_OFF = process.env.FIRESTORE_DISABLED === "1";
 const memState = new Map();
+const SESSION_TTL_HOURS = Math.max(1, +(process.env.SESSION_TTL_HOURS || 24));
+const MEM_STATE_MAX = Math.max(1000, +(process.env.MEM_STATE_MAX || 10000));
+let sessionSchemaReady = false;
+let lastSessionCleanup = 0;
+const freshState = () => ({ exchangeCount: 0, ctaShown: false, history: [], usedReplies: [] });
+
+function memoryState(sessionID) {
+  const entry = memState.get(sessionID);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    memState.delete(sessionID);
+    return null;
+  }
+  return entry.state;
+}
+
+function rememberState(sessionID, state) {
+  if (memState.size >= MEM_STATE_MAX) memState.delete(memState.keys().next().value);
+  memState.set(sessionID, { state, expiresAt: Date.now() + SESSION_TTL_HOURS * 3600000 });
+}
+
+async function ensureSessionSchema() {
+  if (sessionSchemaReady || !process.env.DATABASE_URL) return sessionSchemaReady;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+      session_id TEXT PRIMARY KEY,
+      state JSONB NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_sessions_expiry ON chat_sessions (expires_at);
+  `);
+  sessionSchemaReady = true;
+  return true;
+}
+
 async function loadState(sessionID) {
-  if (FS_OFF) return memState.get(sessionID) || { exchangeCount: 0, ctaShown: false, history: [] };
+  if (process.env.DATABASE_URL) {
+    try {
+      await ensureSessionSchema();
+      const { rows } = await pool.query(
+        `SELECT state FROM chat_sessions WHERE session_id=$1 AND expires_at > now()`, [sessionID]);
+      if (rows[0] && rows[0].state) {
+        rememberState(sessionID, rows[0].state);
+        return rows[0].state;
+      }
+      return memoryState(sessionID) || freshState();
+    } catch (error) {
+      console.warn("session read fell back to memory:", error.message);
+      return memoryState(sessionID) || freshState();
+    }
+  }
+  if (FS_OFF) return memoryState(sessionID) || freshState();
   try {
     const snap = await Promise.race([
       db.collection("chatSessions").doc(sessionID).get(),
       new Promise((_, rej) => setTimeout(() => rej(new Error("fs timeout")), 4000)),
     ]);
-    return (snap && snap.data()) || { exchangeCount: 0, ctaShown: false, history: [] };
+    return (snap && snap.data()) || freshState();
   } catch {
-    return memState.get(sessionID) || { exchangeCount: 0, ctaShown: false, history: [] };
+    return memoryState(sessionID) || freshState();
   }
 }
 async function saveState(sessionID, state) {
-  memState.set(sessionID, state);
+  rememberState(sessionID, state);
+  if (process.env.DATABASE_URL) {
+    try {
+      await ensureSessionSchema();
+      await pool.query(`
+        INSERT INTO chat_sessions (session_id,state,expires_at,updated_at)
+        VALUES ($1,$2::jsonb,now() + $3::int * interval '1 hour',now())
+        ON CONFLICT (session_id) DO UPDATE SET state=EXCLUDED.state,
+          expires_at=EXCLUDED.expires_at,updated_at=now()`,
+      [sessionID, JSON.stringify(state), SESSION_TTL_HOURS]);
+      if (Date.now() - lastSessionCleanup > 3600000) {
+        lastSessionCleanup = Date.now();
+        pool.query(`DELETE FROM chat_sessions WHERE expires_at <= now()`)
+          .catch((error) => console.warn("session cleanup skipped:", error.message));
+      }
+      return;
+    } catch (error) {
+      console.warn("session write fell back to memory:", error.message);
+    }
+  }
   if (FS_OFF) return;
   try {
     await Promise.race([
@@ -279,7 +383,7 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
   const b = req.body || {};
-  const sessionID = b.sessionID || uuid();
+  const sessionID = String(b.sessionID || uuid()).slice(0, 128);
   const messages = Array.isArray(b.messages) ? b.messages : [];
   const lastIncoming = messages.length && messages[messages.length - 1].isIncoming === false;
 
@@ -298,8 +402,11 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   // Once the CTA has dropped, Lori stops engaging here — she wants him OFF this
   // chat and onto her page. Every later fan message gets the redirect, not a reply.
   const alreadyConverted = state.ctaShown;
+  // Auto-CTA after 6 back-and-forths — once she's traded 6 replies with him,
+  // she drops the page on this turn no matter what he said.
+  const autoCTA = state.exchangeCount >= 6;
   const wantCTA = !state.ctaShown &&
-    (phase.operation === "cta" || messages.some((m) => CTA_TRIGGERS.test(m.msg || "")));
+    (autoCTA || phase.operation === "cta" || messages.some((m) => CTA_TRIGGERS.test(m.msg || "")));
 
   // Lori lives near the fan — resolve their city once, inject into the persona.
   const city = await resolveCity(req);
@@ -308,6 +415,9 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   // Did he ask for a pic? The last incoming fan message decides.
   const lastFanMsg = [...messages].reverse().find((m) => m.isIncoming === true);
   const wantPic = !!(lastFanMsg && PIC_REQUEST.test(lastFanMsg.msg || ""));
+  // The frontend marks the proactive opening request as a follow-up with no fan
+  // messages. Keep this beat deterministic: opener snap first, then one exact ask.
+  const isFirstReply = state.exchangeCount === 0 && b.isFollowUp === true;
 
   // Did the fan SEND a pic? Frontend passes it as b.image (base64/URL). Vision
   // model describes it so Lori reacts to what she actually saw, not a canned line.
@@ -325,15 +435,19 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     : (fanImage ? `\nHe just sent you a photo but you can't quite make it out. React playfully like you're intrigued.` : "");
 
   // Build LLM prompt
-  const history = state.history.concat(messages).slice(-24);
+  const history = mergeHistory(state.history, messages).slice(-24);
+  const usedReplies = Array.isArray(state.usedReplies) ? state.usedReplies : [];
   const llmMsgs = [
     { role: "system", content:
         persona +
         imageNote +
         `\nStage right now: ${phase.operation}.` +
         (wantCTA
-          ? `\nHe's ready. Drop your page link ${MODEL_CFG.ofLink} now. Tell him it's completely FREE — you made the whole page free just for him (it's a FREE page, never a 'trial'). Then push him OFF this chat: tell him to come message you on the page RIGHT NOW while you're still online, and to tell you it's him — the guy you were just talking to — so you know. Then END by telling him you're going online on there now so you're leaving this chat (e.g. "okay i'm going online on there now so i'm leaving — message me there rn!"). Keep it cute, 3-4 short bubbles, not pushy or salesy.`
+          ? `\nHe's ready. Drop your page link ${MODEL_CFG.ofLink} now. Tell him it's completely FREE — you flipped your page from paid to free just for him (it was paid before, now it's FREE for him — never say you made/created the page for him, and never say 'trial'). Then push him OFF this chat: tell him to come message you on the page RIGHT NOW while you're still online, and to tell you it's him — the guy you were just talking to — so you know. Then END by telling him you're going online on there now so you're leaving this chat (e.g. "okay i'm going online on there now so i'm leaving — message me there rn!"). Keep it cute, 3-4 short bubbles, not pushy or salesy.`
           : "\nDo NOT mention your page or any link yet. Just flirt and build rapport.") +
+        (usedReplies.length
+          ? `\nLines you already used — do NOT repeat or closely paraphrase any of them: ${usedReplies.slice(-30).join(" | ")}`
+          : "") +
         `\nOutput format: reply with ONLY a JSON object, no other text: {"bubbles":["...","..."]} — 2 to 4 short bubbles.` },
     ...history.map((m) => ({
       role: m.isIncoming ? "user" : "assistant",
@@ -351,19 +465,18 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
       `message me there rn while i'm still online 👀 ${MODEL_CFG.ofLink}`,
       `and tell me it's u so i know it's the guy i was just talking to 💕`,
     ];
+  } else if (isFirstReply) {
+    bubbles = ["hi.. send me a picture of you"];
+  } else if (wantCTA) {
+    // Deterministic close: all required conversion beats, no repeated instruction,
+    // and exactly three text bubbles before the final spiciest snap.
+    bubbles = [
+      `i flipped my page from paid to free for u 👀 ${MODEL_CFG.ofLink}`,
+      `tell me it's u when u message me there so i know it's the guy i was just talking to 😊`,
+      `i'm going online there now, so i'm leaving this chat 😘`,
+    ];
   } else try {
-    const ac = new AbortController();
-    const killer = setTimeout(() => ac.abort(), 20000);   // was 8s — too tight, caused fallbacks
-    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      signal: ac.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENROUTER_KEY.value()}`,
-        "HTTP-Referer": "https://cupid-replica.web.app",
-        "X-Title": "Cupid Replica",
-      },
-      body: JSON.stringify({
+    const { json: j } = await openRouterJSON(OPENROUTER_KEY.value(), {
         model: MODEL,
         messages: llmMsgs,
         temperature: 0.6,          // tighter — less hallucinated life-story
@@ -371,10 +484,7 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
         frequency_penalty: 0.4,    // cut repetitive filler
         max_tokens: 200,           // force short bubbles
         response_format: { type: "json_object" },
-      }),
-    });
-    clearTimeout(killer);
-    const j = await r.json();
+      }, { timeoutMs: 20000, title: "Cupid Replica", fallbackModel: FALLBACK_MODEL });
     const raw = j.choices && j.choices[0] && j.choices[0].message
       ? j.choices[0].message.content : "";
     // tolerate the model wrapping JSON in prose or code fences
@@ -388,7 +498,8 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA, messages, city);
 
   // CTA: guarantee the link + the redirect beats drop exactly once. FREE page —
-  // she made it free just for him (never a "trial").
+  // she flipped her (already-existing, paid) page to free for him. Never say
+  // she MADE the page for him, and never call it a "trial".
   // - If Lori already included the link herself: just make sure the redirect is there.
   // - If she teased "free" but no link: append a short link-only bubble.
   // - Otherwise: append the full canned pitch with the link.
@@ -399,7 +510,7 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
       const teasedFree = bubbles.some((x) => /\bfree\b/i.test(x));
       bubbles.push(teasedFree
         ? `it's here 👀 ${MODEL_CFG.ofLink}`
-        : `okay so… i made a page and made it free just for u 👀 ${MODEL_CFG.ofLink} 💕`);
+        : `okay so… i flipped my page from paid to free for u 👀 ${MODEL_CFG.ofLink} 💕`);
     }
     // Always land the disconnect: she's going online on her page and leaving
     // this chat — message her there now while she's online, and say it's u.
@@ -416,6 +527,16 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     }
   }
 
+  // Prompting helps, but this is the hard guarantee: remove exact and near
+  // repeats against every Lori line already used in this session and against
+  // earlier bubbles in the same response.
+  if (!alreadyConverted) {
+    bubbles = filterNovelBubbles(bubbles, usedReplies);
+    if (!bubbles.length) {
+      bubbles = novelRecoveryBubbles(state.exchangeCount, usedReplies);
+    }
+  }
+
   const now = Date.now() / 1000;
   const options = bubbles.map((msg) => ({
     msg, isIncoming: false, type: "body", style: "short", timestamp: now,
@@ -423,19 +544,26 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
 
   // Snap beats — pick the right photo for where the convo is:
   //  1. verify: he called her fake/bot → proof pic (beats everything else)
-  //  2. opener: brand-new convo → her first hello snap
+  //  2. opener: brand-new convo → her hello snap lands BEFORE the "hi" text
   //  3. pic request: escalate casual early → spicy as exchanges build
+  //  4. CTA: the spiciest pic lands AFTER every CTA/disconnect bubble
   const wantVerify = !!(lastFanMsg && VERIFY_REQUEST.test(lastFanMsg.msg || ""));
-  const isFirstReply = state.exchangeCount === 0 && !wantVerify;
 
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-  if (wantVerify) {
-    options.push({ ...pick(MEDIA_POOLS.verify), isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
+  const mediaOpt = (pool) => ({ ...pool, isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
+
+  // Opener/verification/requested snaps lead the text response. The CTA snap is
+  // intentionally different: it is appended after the final leaving bubble.
+  if (wantVerify && !wantCTA) {
+    options.unshift(mediaOpt(pick(MEDIA_POOLS.verify)));
   } else if (isFirstReply) {
-    options.push({ ...MEDIA_POOLS.opener, isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
-  } else if (wantPic) {
+    options.unshift(mediaOpt(MEDIA_POOLS.opener));
+  } else if (wantPic && !wantCTA) {
     const tier = state.exchangeCount >= PHASES[1].minExchanges ? MEDIA_POOLS.spicy : MEDIA_POOLS.casual;
-    options.push({ ...pick(tier), isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
+    options.unshift(mediaOpt(pick(tier)));
+  }
+  if (wantCTA) {
+    options.push(mediaOpt(MEDIA_POOLS.spiciest));
   }
 
   // Persist state
@@ -444,7 +572,12 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   await saveState(sessionID, {
     exchangeCount: newCount,
     ctaShown: newCta,
-    history: history.concat([{ isIncoming: false, msg: bubbles.join(" ") }]).slice(-24),
+    history: history.concat(bubbles.map((msg, i) => ({
+      id: `lori-${Date.now()}-${i}`,
+      isIncoming: false,
+      msg,
+    }))).slice(-24),
+    usedReplies: usedReplies.concat(bubbles).slice(-80),
   });
 
   res.json({
@@ -500,6 +633,82 @@ function sanitizeBubbles(raw) {
     .slice(0, 4);
 }
 
+function replyFingerprint(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/g, " link ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function repliesAreSimilar(a, b) {
+  const left = replyFingerprint(a);
+  const right = replyFingerprint(b);
+  if (!left || !right) return false;
+  if (left === right) return true;
+
+  const leftWords = [...new Set(left.split(" "))];
+  const rightWords = [...new Set(right.split(" "))];
+  if (Math.min(leftWords.length, rightWords.length) < 3) return false;
+  const rightSet = new Set(rightWords);
+  const shared = leftWords.filter((word) => rightSet.has(word)).length;
+  const containment = shared / Math.min(leftWords.length, rightWords.length);
+  const lengthRatio = Math.min(left.length, right.length) / Math.max(left.length, right.length);
+  return containment >= 0.8 && lengthRatio >= 0.65;
+}
+
+function filterNovelBubbles(raw, usedReplies) {
+  const accepted = [];
+  const previous = Array.isArray(usedReplies) ? usedReplies : [];
+  for (const bubble of raw) {
+    if (previous.some((old) => repliesAreSimilar(bubble, old))) continue;
+    if (accepted.some((old) => repliesAreSimilar(bubble, old))) continue;
+    accepted.push(bubble);
+  }
+  // Multiple question bubbles usually restate the same conversational ask
+  // (for example "you?" followed by "got plans?"). Keep only the most specific.
+  const questions = accepted.filter((bubble) => /\?\s*$/.test(bubble));
+  if (questions.length <= 1) return accepted;
+  const bestQuestion = questions.reduce((best, bubble) =>
+    replyFingerprint(bubble).length > replyFingerprint(best).length ? bubble : best);
+  return accepted.filter((bubble) => !/\?\s*$/.test(bubble) || bubble === bestQuestion);
+}
+
+function novelRecoveryBubbles(exchangeCount, usedReplies) {
+  const banks = [
+    ["wait tell me more about that 👀", "what happened next?"],
+    ["okay now i'm curious", "how did u get into that?"],
+    ["ur actually interesting lol", "what else should i know about u?"],
+    ["i wasn't expecting that answer 🙈", "keep going"],
+    ["hmm okay i see u", "what are u doing rn?"],
+    ["that made me smile 😊", "tell me one more thing"],
+    ["okay ur growing on me", "what's ur best story?"],
+    ["i like talking to u", "give me a random fact about u"],
+  ];
+  for (let offset = 0; offset < banks.length; offset++) {
+    const bank = banks[(exchangeCount + offset) % banks.length];
+    const novel = filterNovelBubbles(bank, usedReplies);
+    if (novel.length) return novel;
+  }
+  return [`okay i'm listening ${exchangeCount + 1}`];
+}
+
+function mergeHistory(existing, incoming) {
+  const merged = [];
+  const seen = new Set();
+  for (const msg of [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(incoming) ? incoming : [])]) {
+    if (!msg) continue;
+    const key = msg.id
+      ? `id:${msg.id}`
+      : `${msg.isIncoming ? "fan" : "lori"}:${replyFingerprint(msg.msg)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(msg);
+  }
+  return merged;
+}
+
 function convoData(s) {
   const phase = phaseFor(s.exchangeCount, s.ctaShown);
   return {
@@ -527,7 +736,8 @@ function fallbackBubbles(phase, cta, messages, city) {
   if (/\b(how are you|hows it going|how are u|hru)\b/.test(last)) return react(["i'm good 🥰", "little bored tbh", "glad u messaged me"]);
   if (/\b(where|from|live|city)\b/.test(last)) return react([city || "my little town", "u? where r u"]);
   if (/\b(what.*do|job|work|hobby|fun)\b/.test(last)) return react(["i'm in school rn 😊", "kinda boring tbh", "u? what do u do"]);
-  if (/\b(how much|price|cost)\b/.test(last)) return react(["it's totally free 🥺", "i made it free for u", "u just have to sign up 💕"]);
+  if (/\b(how much|price|cost)\b/.test(last)) return react(["it's totally free 🥺", "i flipped it from paid to free for u", "u just have to sign up 💕"]);
+  if (/\b(no thanks|rather not|don'?t want|not sending|maybe later|no pic)\b/.test(last)) return react(["that's okay 😊", "no pressure at all", "what are u up to rn?"]);
   if (/\b(pics?|photo|selfie|snap|nudes?|show me|send)\b/.test(last)) return react(["ok ok one sec 🙈", "don't screenshot lol"]);
   const warm = ["heyy 🥰", "wait hi", "lol ok", "ur sweet"];
   const build = ["u seem sweet", "i'm kinda new to this 🥺", "tell me more"];
@@ -578,14 +788,9 @@ exports.report = onRequest((req, res) => {
 exports.geo = onRequest(async (req, res) => {
   CORS(res);
   if (req.method === "OPTIONS") return res.status(204).send("");
-  const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.ip;
-  try {
-    const r = await fetch(`https://ipwho.is/${ip}`);
-    const j = await r.json();
-    return res.json({ city: j.city || null, country: j.country_code || null, ip });
-  } catch (e) {
-    return res.json({ city: null, country: null, ip });
-  }
+  const ip = clientIP(req);
+  const geo = await lookupGeo(req);
+  return res.json({ city: geo.city, country: geo.country, ip });
 });
 
 // ---------------------------------------------------------------------------
