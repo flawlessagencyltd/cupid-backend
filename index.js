@@ -17,7 +17,7 @@ const OPENROUTER_KEY = defineSecret("OPENROUTER_API_KEY");
 const MODEL = process.env.OPENROUTER_MODEL || "cognitivecomputations/dolphin-mistral-24b-venice-edition";
 // Vision model — "sees" pics the fan sends. Gemini Flash: fast, cheap (~$0.001/pic),
 // great at describing images. Swap via OPENROUTER_VISION_MODEL.
-const VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "google/gemini-flash-1.5";
+const VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "google/gemini-2.5-flash";
 
 // Analyze a fan-sent image → a short, concrete description Lori can react to.
 // imageData: base64 data URL ("data:image/jpeg;base64,...") OR a raw https URL.
@@ -53,6 +53,10 @@ async function describeFanImage(imageData, apiKey) {
     });
     clearTimeout(killer);
     const j = await r.json();
+    if (!r.ok || j.error) {
+      console.warn("vision upstream", r.status, JSON.stringify(j.error || j).slice(0, 300));
+      return "";
+    }
     const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
     return String(txt).replace(/\s+/g, " ").trim().slice(0, 220);
   } catch (e) {
