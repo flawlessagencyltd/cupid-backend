@@ -266,11 +266,6 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   const city = await resolveCity(req);
   const persona = MODEL_CFG.persona.replace(/\{city\}/g, city || "a small town");
 
-  // If he sent a pic, tell Lori what she's looking at so she reacts to the real thing.
-  const imageNote = fanImageDesc
-    ? `\nIMPORTANT: He just sent you a photo. It shows: ${fanImageDesc} React naturally to THIS specific photo — compliment it, tease him, or comment on what's actually in it. Do NOT pretend you can't see it.`
-    : (fanImage ? `\nHe just sent you a photo but you can't quite make it out. React playfully like you're intrigued.` : "");
-
   // Did he ask for a pic? The last incoming fan message decides.
   const lastFanMsg = [...messages].reverse().find((m) => m.isIncoming === true);
   const wantPic = !!(lastFanMsg && PIC_REQUEST.test(lastFanMsg.msg || ""));
@@ -281,6 +276,11 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   const fanImageDesc = fanImage
     ? await describeFanImage(fanImage, OPENROUTER_KEY.value())
     : "";
+
+  // If he sent a pic, tell Lori what she's looking at so she reacts to the real thing.
+  const imageNote = fanImageDesc
+    ? `\nIMPORTANT: He just sent you a photo. It shows: ${fanImageDesc} React naturally to THIS specific photo — compliment it, tease him, or comment on what's actually in it. Do NOT pretend you can't see it.`
+    : (fanImage ? `\nHe just sent you a photo but you can't quite make it out. React playfully like you're intrigued.` : "");
 
   // Build LLM prompt
   const history = state.history.concat(messages).slice(-24);
