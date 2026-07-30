@@ -15,6 +15,51 @@ const db = admin.firestore();
 const OPENROUTER_KEY = defineSecret("OPENROUTER_API_KEY");
 // Pluggable model — default uncensored dolphin-mixtral
 const MODEL = process.env.OPENROUTER_MODEL || "cognitivecomputations/dolphin-mistral-24b-venice-edition";
+// Vision model — "sees" pics the fan sends. Gemini Flash: fast, cheap (~$0.001/pic),
+// great at describing images. Swap via OPENROUTER_VISION_MODEL.
+const VISION_MODEL = process.env.OPENROUTER_VISION_MODEL || "google/gemini-flash-1.5";
+
+// Analyze a fan-sent image → a short, concrete description Lori can react to.
+// imageData: base64 data URL ("data:image/jpeg;base64,...") OR a raw https URL.
+// Returns "" on any failure (we never block the chat over a failed vision call).
+async function describeFanImage(imageData, apiKey) {
+  if (!imageData) return "";
+  const imageUrl = /^https?:\/\//.test(imageData)
+    ? imageData
+    : imageData.startsWith("data:") ? imageData : `data:image/jpeg;base64,${imageData}`;
+  try {
+    const ac = new AbortController();
+    const killer = setTimeout(() => ac.abort(), 12000);
+    const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      signal: ac.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "HTTP-Referer": "https://cupid-replica.web.app",
+        "X-Title": "Cupid Replica Vision",
+      },
+      body: JSON.stringify({
+        model: VISION_MODEL,
+        max_tokens: 120,
+        messages: [{
+          role: "user",
+          content: [
+            { type: "text", text: "Briefly describe this image in 1-2 short sentences: what it shows (a man's face/selfie, a body part, an object, a meme, scenery, etc) and any notable detail. Be concrete and factual. If it is sexually explicit, just say so plainly without graphic detail." },
+            { type: "image_url", image_url: { url: imageUrl } },
+          ],
+        }],
+      }),
+    });
+    clearTimeout(killer);
+    const j = await r.json();
+    const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
+    return String(txt).replace(/\s+/g, " ").trim().slice(0, 220);
+  } catch (e) {
+    console.warn("vision failed:", e.message);
+    return "";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Model persona config — Lori💕 (clickfor.vip/mirakensleyu, IG padelgurly)
@@ -221,15 +266,28 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   const city = await resolveCity(req);
   const persona = MODEL_CFG.persona.replace(/\{city\}/g, city || "a small town");
 
+  // If he sent a pic, tell Lori what she's looking at so she reacts to the real thing.
+  const imageNote = fanImageDesc
+    ? `\nIMPORTANT: He just sent you a photo. It shows: ${fanImageDesc} React naturally to THIS specific photo — compliment it, tease him, or comment on what's actually in it. Do NOT pretend you can't see it.`
+    : (fanImage ? `\nHe just sent you a photo but you can't quite make it out. React playfully like you're intrigued.` : "");
+
   // Did he ask for a pic? The last incoming fan message decides.
   const lastFanMsg = [...messages].reverse().find((m) => m.isIncoming === true);
   const wantPic = !!(lastFanMsg && PIC_REQUEST.test(lastFanMsg.msg || ""));
+
+  // Did the fan SEND a pic? Frontend passes it as b.image (base64/URL). Vision
+  // model describes it so Lori reacts to what she actually saw, not a canned line.
+  const fanImage = b.image || (lastFanMsg && lastFanMsg.image) || null;
+  const fanImageDesc = fanImage
+    ? await describeFanImage(fanImage, OPENROUTER_KEY.value())
+    : "";
 
   // Build LLM prompt
   const history = state.history.concat(messages).slice(-24);
   const llmMsgs = [
     { role: "system", content:
         persona +
+        imageNote +
         `\nStage right now: ${phase.operation}.` +
         (wantCTA
           ? `\nHe's ready. Drop your page link ${MODEL_CFG.ofLink} now. Tell him it's completely FREE — you made the whole page free just for him (it's a FREE page, never a 'trial'). Then push him OFF this chat: tell him to come message you on the page RIGHT NOW while you're still online, and to tell you it's him — the guy you were just talking to — so you know. Then END by telling him you're going online on there now so you're leaving this chat (e.g. "okay i'm going online on there now so i'm leaving — message me there rn!"). Keep it cute, 3-4 short bubbles, not pushy or salesy.`
