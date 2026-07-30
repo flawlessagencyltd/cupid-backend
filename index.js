@@ -270,6 +270,12 @@ const PIC_REQUEST =
   /\b(?:send|show)\s+(?:me\s+)?(?:a\s+|some\s+|ur\s+|your\s+)?(?:pics?|photos?|selfies?|snaps?|nudes?)\b|\b(?:can|could|may)\s+i\s+(?:see|get)\s+(?:a\s+|some\s+|ur\s+|your\s+)?(?:pics?|photos?|selfies?|snaps?|nudes?)\b|\bwhat do (?:u|you) look like\b/i;
 const PIC_REASON =
   /\bwhy\b.{0,50}\b(?:need|want|ask(?:ing)? for)\b.{0,30}\b(?:pics?|pictures?|photos?|selfies?|one|it|that)\b|\bwhat(?:'s| is)? (?:the pic|that|it) for\b|\bwhat for\b.{0,30}\b(?:pics?|pictures?|photos?|selfies?)\b/i;
+const PIC_DECLINE =
+  /\b(?:don'?t|do not|won'?t|will not|can'?t|cannot)\b.{0,30}\b(?:send|share)\b.{0,20}\b(?:pics?|pictures?|photos?|selfies?|one)\b|\b(?:no thanks|rather not|not sending|no pic|maybe later|i'?m shy)\b/i;
+const SIMPLE_GREETING = /^\s*(?:hi+|hey+|hello|yo)(?:\s+lori)?[!.?]*\s*$/i;
+const WHY_MESSAGE = /\b(?:what made u message me|what made you message me|why did u message me|why did you message me)\b/i;
+const HOBBY_CONTEXT = /\b(?:like|love|watch(?:ing)?|play(?:ing)?|movies?|games?|gaming|sports?|music|hobb(?:y|ies))\b/i;
+const CLAIMS_SHARED_HOBBY = /\b(?:me too|same here|i (?:like|love|watch|play|enjoy)\b|love (?:it|that|them) too)\b/i;
 
 // Fan doubts she's real → drop a verification snap.
 const VERIFY_REQUEST = /\b(fake|bot|robot|ai\b|not real|are? u real|r u real|catfish|scam|prove it|proof|really you|actually real|you'?re fake|this is fake)\b/i;
@@ -285,6 +291,10 @@ function messageRequestsPic(value) {
 
 function messageAsksWhyPic(value) {
   return PIC_REASON.test(String(value || ""));
+}
+
+function messageDeclinesPic(value) {
+  return PIC_DECLINE.test(String(value || ""));
 }
 
 function messageTriggersCTA(value) {
@@ -432,7 +442,8 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
 
   // Did he ask for a pic? The last incoming fan message decides.
   const lastFanMsg = [...messages].reverse().find((m) => m.isIncoming === true);
-  const wantPic = !!(lastFanMsg && messageRequestsPic(lastFanMsg.msg));
+  const declinesPic = !!(lastFanMsg && messageDeclinesPic(lastFanMsg.msg));
+  const wantPic = !!(lastFanMsg && !declinesPic && messageRequestsPic(lastFanMsg.msg));
   const asksWhyPic = !!(lastFanMsg && messageAsksWhyPic(lastFanMsg.msg));
   // The frontend marks the proactive opening request as a follow-up with no fan
   // messages. Keep this beat deterministic: opener snap first, then one exact ask.
@@ -486,8 +497,6 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     ];
   } else if (isFirstReply) {
     bubbles = ["hi.. send me a picture of you"];
-  } else if (asksWhyPic) {
-    bubbles = ["i'm just curious what u look like 🙈", "but u don't have to send one"];
   } else if (wantCTA) {
     // Deterministic close: all required conversion beats, no repeated instruction,
     // and exactly three text bubbles before the final spiciest snap.
@@ -496,6 +505,14 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
       `tell me it's u when u message me there so i know it's the guy i was just talking to 😊`,
       `i'm going online there now, so i'm leaving this chat 😘`,
     ];
+  } else if (asksWhyPic) {
+    bubbles = ["i'm just curious what u look like 🙈", "but u don't have to send one"];
+  } else if (declinesPic) {
+    bubbles = ["that's okay 😊", "no pressure at all", "we can just talk"];
+  } else if (SIMPLE_GREETING.test(lastFanMsg?.msg || "")) {
+    bubbles = ["heyy 😊", "how are u?"];
+  } else if (WHY_MESSAGE.test(lastFanMsg?.msg || "")) {
+    bubbles = ["u seemed interesting 👀", "and i was bored tbh"];
   } else try {
     const { json: j } = await openRouterJSON(OPENROUTER_KEY.value(), {
         model: MODEL,
@@ -517,6 +534,13 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     bubbles = fallbackBubbles(phase, wantCTA, messages, city);
   }
   if (!bubbles.length) bubbles = fallbackBubbles(phase, wantCTA, messages, city);
+
+  // Do not let Lori manufacture a shared hobby just because the fan mentioned
+  // one. She can stay curious without claiming she likes the same thing.
+  if (!wantCTA && lastFanMsg && HOBBY_CONTEXT.test(lastFanMsg.msg || "")) {
+    const grounded = bubbles.filter((line) => !CLAIMS_SHARED_HOBBY.test(line));
+    bubbles = grounded.length ? grounded : ["tell me more about that 👀"];
+  }
 
   // CTA: guarantee the link + the redirect beats drop exactly once. FREE page —
   // she flipped her (already-existing, paid) page to free for him. Never say
@@ -830,4 +854,6 @@ exports.pixel = onRequest((req, res) => {
   res.json({ success: true });
 });
 
-exports._internal = { messageRequestsPic, messageAsksWhyPic, messageTriggersCTA };
+exports._internal = {
+  messageRequestsPic, messageAsksWhyPic, messageDeclinesPic, messageTriggersCTA,
+};

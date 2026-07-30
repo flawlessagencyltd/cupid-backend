@@ -39,5 +39,6 @@ test("picture questions stay in chat instead of triggering the CTA", () => {
   assert.equal(chatInternal.messageRequestsPic("why do u need a pic of me?"), false);
   assert.equal(chatInternal.messageAsksWhyPic("why do u need a pic of me?"), true);
   assert.equal(chatInternal.messageRequestsPic("can u send me a pic?"), true);
+  assert.equal(chatInternal.messageDeclinesPic("i dont want to send a pic"), true);
   assert.equal(chatInternal.messageTriggersCTA("what's your onlyfans?"), true);
 });
