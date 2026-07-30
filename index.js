@@ -264,14 +264,32 @@ const MEDIA_POOLS = {
   // missing, it's all on the free page" nudge as she pushes him off the chat.
   spiciest: { url: "/assets/snaps/spiciest.jpg", caption: "the rest is on my free page… don't keep me waiting 🥵", ttl: 10 },
 };
-const PIC_REQUEST = /\b(pics?|pic|photo|selfie|snap|nudes?|show me|send (me|a)|see (you|ur)|what do u look like)\b/i;
+// A picture mention is not automatically a request for Lori to send one.
+// This deliberately excludes questions such as "why do u need a pic of me?".
+const PIC_REQUEST =
+  /\b(?:send|show)\s+(?:me\s+)?(?:a\s+|some\s+|ur\s+|your\s+)?(?:pics?|photos?|selfies?|snaps?|nudes?)\b|\b(?:can|could|may)\s+i\s+(?:see|get)\s+(?:a\s+|some\s+|ur\s+|your\s+)?(?:pics?|photos?|selfies?|snaps?|nudes?)\b|\bwhat do (?:u|you) look like\b/i;
+const PIC_REASON =
+  /\bwhy\b.{0,50}\b(?:need|want|ask(?:ing)? for)\b.{0,30}\b(?:pics?|pictures?|photos?|selfies?|one|it|that)\b|\bwhat(?:'s| is)? (?:the pic|that|it) for\b|\bwhat for\b.{0,30}\b(?:pics?|pictures?|photos?|selfies?)\b/i;
 
 // Fan doubts she's real → drop a verification snap.
 const VERIFY_REQUEST = /\b(fake|bot|robot|ai\b|not real|are? u real|r u real|catfish|scam|prove it|proof|really you|actually real|you'?re fake|this is fake)\b/i;
 
-// Detect buy-intent / objection to trigger CTA early
+// Detect explicit page/buy intent to trigger CTA early. Generic picture words
+// do not belong here: asking about or requesting a photo should stay in chat.
 const CTA_TRIGGERS =
-  /\b(how much|price|cost|free trial|trial|free page|(?:your|ur) page|page link|nudes?|pics?|onlyfans|see (you|ur)|show me|sign ?up|subscribe|content)\b/i;
+  /\b(how much|price|cost|free trial|trial|free page|(?:your|ur) page|page link|nudes?|onlyfans|sign ?up|subscribe)\b/i;
+
+function messageRequestsPic(value) {
+  return PIC_REQUEST.test(String(value || ""));
+}
+
+function messageAsksWhyPic(value) {
+  return PIC_REASON.test(String(value || ""));
+}
+
+function messageTriggersCTA(value) {
+  return CTA_TRIGGERS.test(String(value || ""));
+}
 
 // Firestore with fail-soft: if the DB hangs (no creds, emulator down, cold
 // network), fall back to in-memory state so the fan never sits in silence.
@@ -406,7 +424,7 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   // she drops the page on this turn no matter what he said.
   const autoCTA = state.exchangeCount >= 6;
   const wantCTA = !state.ctaShown &&
-    (autoCTA || phase.operation === "cta" || messages.some((m) => CTA_TRIGGERS.test(m.msg || "")));
+    (autoCTA || phase.operation === "cta" || messages.some((m) => messageTriggersCTA(m.msg)));
 
   // Lori lives near the fan — resolve their city once, inject into the persona.
   const city = await resolveCity(req);
@@ -414,7 +432,8 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
 
   // Did he ask for a pic? The last incoming fan message decides.
   const lastFanMsg = [...messages].reverse().find((m) => m.isIncoming === true);
-  const wantPic = !!(lastFanMsg && PIC_REQUEST.test(lastFanMsg.msg || ""));
+  const wantPic = !!(lastFanMsg && messageRequestsPic(lastFanMsg.msg));
+  const asksWhyPic = !!(lastFanMsg && messageAsksWhyPic(lastFanMsg.msg));
   // The frontend marks the proactive opening request as a follow-up with no fan
   // messages. Keep this beat deterministic: opener snap first, then one exact ask.
   const isFirstReply = state.exchangeCount === 0 && b.isFollowUp === true;
@@ -467,6 +486,8 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     ];
   } else if (isFirstReply) {
     bubbles = ["hi.. send me a picture of you"];
+  } else if (asksWhyPic) {
+    bubbles = ["i'm just curious what u look like 🙈", "but u don't have to send one"];
   } else if (wantCTA) {
     // Deterministic close: all required conversion beats, no repeated instruction,
     // and exactly three text bubbles before the final spiciest snap.
@@ -742,8 +763,9 @@ function fallbackBubbles(phase, cta, messages, city) {
   if (/\b(where|from|live|city)\b/.test(last)) return react([city || "my little town", "u? where r u"]);
   if (/\b(what.*do|job|work|hobby|fun)\b/.test(last)) return react(["i'm in school rn 😊", "kinda boring tbh", "u? what do u do"]);
   if (/\b(how much|price|cost)\b/.test(last)) return react(["it's totally free 🥺", "i flipped it from paid to free for u", "u just have to sign up 💕"]);
+  if (messageAsksWhyPic(last)) return react(["i'm just curious what u look like 🙈", "but u don't have to send one"]);
   if (/\b(no thanks|rather not|don'?t want|not sending|maybe later|no pic)\b/.test(last)) return react(["that's okay 😊", "no pressure at all", "what are u up to rn?"]);
-  if (/\b(pics?|photo|selfie|snap|nudes?|show me|send)\b/.test(last)) return react(["ok ok one sec 🙈", "don't screenshot lol"]);
+  if (messageRequestsPic(last)) return react(["ok ok one sec 🙈", "don't screenshot lol"]);
   const warm = ["heyy 🥰", "wait hi", "lol ok", "ur sweet"];
   const build = ["u seem sweet", "i'm kinda new to this 🥺", "tell me more"];
   const tease = ["i do this thing on the side…", "can't really show u here 😳", "u promise ur not a weirdo? 🙈"];
@@ -807,3 +829,5 @@ exports.pixel = onRequest((req, res) => {
   // Fan-out to Meta Conversions API if PIXEL_ID + token configured
   res.json({ success: true });
 });
+
+exports._internal = { messageRequestsPic, messageAsksWhyPic, messageTriggersCTA };

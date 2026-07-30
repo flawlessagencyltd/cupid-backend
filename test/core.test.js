@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { isAllowedOrigin } = require("../http");
 const { _internal } = require("../tracking");
+const { _internal: chatInternal } = require("../index");
 
 test("production and local origins are allowed", () => {
   assert.equal(isAllowedOrigin("https://chat4free.us"), true);
@@ -31,4 +32,12 @@ test("country exclusions are normalized and can use a recovery URL", () => {
   });
   assert.equal(_internal.countryAccess(["GB"], "US").blocked, false);
   assert.equal(_internal.countryAccess(["GB"], "").blocked, false);
+});
+
+test("picture questions stay in chat instead of triggering the CTA", () => {
+  assert.equal(chatInternal.messageTriggersCTA("why do u need a pic of me?"), false);
+  assert.equal(chatInternal.messageRequestsPic("why do u need a pic of me?"), false);
+  assert.equal(chatInternal.messageAsksWhyPic("why do u need a pic of me?"), true);
+  assert.equal(chatInternal.messageRequestsPic("can u send me a pic?"), true);
+  assert.equal(chatInternal.messageTriggersCTA("what's your onlyfans?"), true);
 });
