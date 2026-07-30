@@ -271,7 +271,7 @@ const VERIFY_REQUEST = /\b(fake|bot|robot|ai\b|not real|are? u real|r u real|cat
 
 // Detect buy-intent / objection to trigger CTA early
 const CTA_TRIGGERS =
-  /\b(how much|price|cost|free trial|trial|nudes?|pics?|onlyfans|see (you|ur)|show me|sign ?up|subscribe|content)\b/i;
+  /\b(how much|price|cost|free trial|trial|free page|(?:your|ur) page|page link|nudes?|pics?|onlyfans|see (you|ur)|show me|sign ?up|subscribe|content)\b/i;
 
 // Firestore with fail-soft: if the DB hangs (no creds, emulator down, cold
 // network), fall back to in-memory state so the fan never sits in silence.
@@ -597,13 +597,18 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
 
 // Post-process LLM bubbles: kill character-breaking words, merge comma-fragments,
 // and keep each bubble a complete short thought. Runs on every LLM turn.
-const BANNED = /\b(padel|shucks|delve)\b/i;
+const BANNED = /\b(padel|shucks|delve|vibe)\b/i;
+const PAGE_CREATION =
+  /\b(?:made|created|built|set up)\b.{0,24}\b(?:page|account)\b|\b(?:page|account)\b.{0,24}\b(?:made|created|built|set up)\b/i;
 function sanitizeBubbles(raw) {
   let list = (Array.isArray(raw) ? raw : [])
     .map((s) => String(s || "").trim())
     .filter(Boolean)
     // drop any bubble that breaks character or mentions removed topics
     .filter((s) => !BANNED.test(s))
+    // Her page already existed and was paid before she flipped it to free.
+    // Never let the model describe it as something she made or created.
+    .filter((s) => !PAGE_CREATION.test(s))
     // drop hallucinated prices ($ amounts) — Lori never quotes a number
     .filter((s) => !/\$\s?\d/.test(s));
 
