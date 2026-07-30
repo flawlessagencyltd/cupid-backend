@@ -301,6 +301,14 @@ function messageTriggersCTA(value) {
   return CTA_TRIGGERS.test(String(value || ""));
 }
 
+function ctaCloseBubbles() {
+  return [
+    `i flipped my page from paid to free for u 👀 ${MODEL_CFG.ofLink}`,
+    `tell me it's u when u message me there so i know it's the guy i was just talking to 😊`,
+    `i'm going online there now, so i'm leaving this chat 😘`,
+  ];
+}
+
 // Firestore with fail-soft: if the DB hangs (no creds, emulator down, cold
 // network), fall back to in-memory state so the fan never sits in silence.
 // FIRESTORE_DISABLED=1 skips the DB entirely (non-GCP hosts like Railway).
@@ -431,10 +439,12 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   // chat and onto her page. Every later fan message gets the redirect, not a reply.
   const alreadyConverted = state.ctaShown;
   // Auto-CTA after 6 back-and-forths — once she's traded 6 replies with him,
-  // she drops the page on this turn no matter what he said.
+  // she answers his latest message normally, then drops the page on this turn.
   const autoCTA = state.exchangeCount >= 6;
+  const explicitCTA = messages.some((m) => messageTriggersCTA(m.msg));
   const wantCTA = !state.ctaShown &&
-    (autoCTA || phase.operation === "cta" || messages.some((m) => messageTriggersCTA(m.msg)));
+    (autoCTA || phase.operation === "cta" || explicitCTA);
+  const replyBeforeAutoCTA = wantCTA && autoCTA && !explicitCTA;
 
   // Lori lives near the fan — resolve their city once, inject into the persona.
   const city = await resolveCity(req);
@@ -475,7 +485,7 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
         persona +
         imageNote +
         `\nStage right now: ${phase.operation}.` +
-        (wantCTA
+        (wantCTA && !replyBeforeAutoCTA
           ? `\nHe's ready. Drop your page link ${MODEL_CFG.ofLink} now. Tell him it's completely FREE — you flipped your page from paid to free just for him (it was paid before, now it's FREE for him — never say you made/created the page for him, and never say 'trial'). Then push him OFF this chat: tell him to come message you on the page RIGHT NOW while you're still online, and to tell you it's him — the guy you were just talking to — so you know. Then END by telling him you're going online on there now so you're leaving this chat (e.g. "okay i'm going online on there now so i'm leaving — message me there rn!"). Keep it cute, 3-4 short bubbles, not pushy or salesy.`
           : "\nDo NOT mention your page or any link yet. Just flirt and build rapport.") +
         (usedReplies.length
@@ -500,14 +510,10 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
     ];
   } else if (isFirstReply) {
     bubbles = ["hi.. send me a picture of you"];
-  } else if (wantCTA) {
+  } else if (wantCTA && !replyBeforeAutoCTA) {
     // Deterministic close: all required conversion beats, no repeated instruction,
     // and exactly three text bubbles before the final spiciest snap.
-    bubbles = [
-      `i flipped my page from paid to free for u 👀 ${MODEL_CFG.ofLink}`,
-      `tell me it's u when u message me there so i know it's the guy i was just talking to 😊`,
-      `i'm going online there now, so i'm leaving this chat 😘`,
-    ];
+    bubbles = ctaCloseBubbles();
   } else if (asksWhyPic) {
     bubbles = ["i'm just curious what u look like 🙈", "but u don't have to send one"];
   } else if (declinesPic) {
@@ -540,9 +546,15 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
 
   // Do not let Lori manufacture a shared hobby just because the fan mentioned
   // one. She can stay curious without claiming she likes the same thing.
-  if (!wantCTA && lastFanMsg && HOBBY_CONTEXT.test(lastFanMsg.msg || "")) {
+  if ((!wantCTA || replyBeforeAutoCTA) && lastFanMsg && HOBBY_CONTEXT.test(lastFanMsg.msg || "")) {
     const grounded = bubbles.filter((line) => !CLAIMS_SHARED_HOBBY.test(line));
     bubbles = grounded.length ? grounded : ["tell me more about that 👀"];
+  }
+
+  // A scheduled CTA should not ignore the message that happened to hit the
+  // threshold. Keep up to two normal reply bubbles, then transition into CTA.
+  if (replyBeforeAutoCTA) {
+    bubbles = bubbles.slice(0, 2).concat(ctaCloseBubbles());
   }
 
   // CTA: guarantee the link + the redirect beats drop exactly once. FREE page —
