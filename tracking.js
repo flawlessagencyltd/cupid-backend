@@ -262,9 +262,27 @@ exports.trackEvent = onRequest(async (req, res) => {
 exports.conversion = onRequest(async (req, res) => {
   CORS(res);
   if (req.method === "OPTIONS") return res.status(204).send("");
-  if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
   if (!conversionOK(req)) return deny(res);
   if (!(await ensureSchema())) return res.status(503).json({ error: "analytics unavailable" });
+
+  // Providers and operators sometimes need to retract a test, refunded, or
+  // otherwise invalid conversion. Keep this server-to-server and require the
+  // same idempotency key used when the conversion was created.
+  if (req.method === "DELETE") {
+    const externalID = text(
+      (req.body && (req.body.externalID || req.body.externalId)) || req.query.externalID,
+      180
+    );
+    if (!externalID) return res.status(400).json({ error: "externalID required" });
+    try {
+      const result = await pool.query("DELETE FROM events WHERE type='conversion' AND external_id=$1", [externalID]);
+      return res.json({ success: true, deleted: result.rowCount });
+    } catch (error) {
+      console.warn("conversion delete failed:", error.message);
+      return res.status(500).json({ error: "conversion unavailable" });
+    }
+  }
+  if (req.method !== "POST") return res.status(405).json({ error: "POST or DELETE only" });
 
   const body = req.body || {};
   const slug = slugify(body.linkSlug || body.slug);
