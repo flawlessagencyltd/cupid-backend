@@ -34,6 +34,19 @@ test("country exclusions are normalized and can use a recovery URL", () => {
   assert.equal(_internal.countryAccess(["GB"], "").blocked, false);
 });
 
+test("conversation funnel stages are monotonic and end in a protected conversion", () => {
+  assert.deepEqual(_internal.FUNNEL_STAGES, {
+    landing: 0,
+    connected: 1,
+    opener_complete: 2,
+    first_message: 3,
+    first_reply: 4,
+    cta_view: 5,
+    cta_click: 6,
+    conversion: 7,
+  });
+});
+
 test("picture questions stay in chat instead of triggering the CTA", () => {
   assert.equal(chatInternal.messageTriggersCTA("why do u need a pic of me?"), false);
   assert.equal(chatInternal.messageRequestsPic("why do u need a pic of me?"), false);

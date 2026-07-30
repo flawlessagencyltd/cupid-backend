@@ -18,6 +18,28 @@ const VALID_EVENTS = new Set([
   "cta_view", "cta_click",
 ]);
 
+const FUNNEL_STAGES = Object.freeze({
+  landing: 0,
+  connected: 1,
+  opener_complete: 2,
+  first_message: 3,
+  first_reply: 4,
+  cta_view: 5,
+  cta_click: 6,
+  conversion: 7,
+});
+
+const FUNNEL_LABELS = Object.freeze({
+  landing: "Page opened",
+  connected: "Lori connected",
+  opener_complete: "Opener completed",
+  first_message: "Fan sent first message",
+  first_reply: "Lori sent first reply",
+  cta_view: "CTA shown",
+  cta_click: "CTA clicked",
+  conversion: "Converted",
+});
+
 function text(value, max = 300) {
   return String(value == null ? "" : value).trim().slice(0, max);
 }
@@ -177,6 +199,34 @@ async function ensureSchema() {
         ON events (external_id) WHERE external_id<>'';
       CREATE INDEX IF NOT EXISTS idx_links_domain ON links (domain);
 
+      CREATE TABLE IF NOT EXISTS conversation_funnels (
+        session_id       TEXT PRIMARY KEY,
+        visitor_id       TEXT NOT NULL DEFAULT '',
+        link_slug        TEXT NOT NULL DEFAULT '',
+        link_domain      TEXT NOT NULL DEFAULT '',
+        first_seen       TIMESTAMPTZ NOT NULL DEFAULT now(),
+        last_seen        TIMESTAMPTZ NOT NULL DEFAULT now(),
+        exited_at        TIMESTAMPTZ,
+        exit_reason      TEXT NOT NULL DEFAULT '',
+        last_stage       TEXT NOT NULL DEFAULT 'landing',
+        stage_rank       INTEGER NOT NULL DEFAULT 0,
+        dwell_seconds    INTEGER NOT NULL DEFAULT 0,
+        max_exchange     INTEGER NOT NULL DEFAULT 0,
+        ip               TEXT NOT NULL DEFAULT '',
+        device           TEXT NOT NULL DEFAULT '',
+        browser          TEXT NOT NULL DEFAULT '',
+        connected_at     TIMESTAMPTZ,
+        opener_at        TIMESTAMPTZ,
+        first_message_at TIMESTAMPTZ,
+        first_reply_at   TIMESTAMPTZ,
+        cta_view_at      TIMESTAMPTZ,
+        cta_click_at     TIMESTAMPTZ,
+        converted_at     TIMESTAMPTZ
+      );
+      CREATE INDEX IF NOT EXISTS idx_funnels_first_seen ON conversation_funnels (first_seen DESC);
+      CREATE INDEX IF NOT EXISTS idx_funnels_last_seen ON conversation_funnels (last_seen DESC);
+      CREATE INDEX IF NOT EXISTS idx_funnels_slug_first ON conversation_funnels (link_slug, first_seen DESC);
+
       INSERT INTO domains (host, label, status, is_primary)
       VALUES ('cupid-replica1.web.app', 'Firebase Hosting', 'connected', true)
       ON CONFLICT (host) DO NOTHING;
@@ -191,6 +241,20 @@ async function ensureSchema() {
 
 function sinceClause(range, alias = "") {
   const col = alias ? `${alias}.at` : "at";
+  switch (range) {
+    case "24h": return `${col} >= now() - interval '24 hours'`;
+    case "7d": return `${col} >= now() - interval '7 days'`;
+    case "14d": return `${col} >= now() - interval '14 days'`;
+    case "30d": return `${col} >= now() - interval '30 days'`;
+    case "3m": return `${col} >= now() - interval '3 months'`;
+    case "6m": return `${col} >= now() - interval '6 months'`;
+    case "12m": return `${col} >= now() - interval '12 months'`;
+    default: return "TRUE";
+  }
+}
+
+function funnelSinceClause(range, alias = "") {
+  const col = alias ? `${alias}.first_seen` : "first_seen";
   switch (range) {
     case "24h": return `${col} >= now() - interval '24 hours'`;
     case "7d": return `${col} >= now() - interval '7 days'`;
@@ -281,6 +345,78 @@ exports.trackEvent = onRequest(async (req, res) => {
   return res.json({ success: true });
 });
 
+// One compact row per conversation records the furthest point reached. The
+// browser updates this row on milestones and heartbeats, so exit reporting does
+// not create a high-volume stream of heartbeat events.
+exports.trackFunnel = onRequest(async (req, res) => {
+  CORS(res);
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
+
+  const body = req.body || {};
+  const sessionID = text(body.sessionID, 100);
+  const stage = text(body.stage, 40);
+  const action = ["stage", "heartbeat", "exit"].includes(body.action) ? body.action : "stage";
+  if (!sessionID) return res.status(400).json({ error: "sessionID required" });
+  if (!Object.prototype.hasOwnProperty.call(FUNNEL_STAGES, stage)) {
+    return res.status(400).json({ error: "bad stage" });
+  }
+
+  const rank = FUNNEL_STAGES[stage];
+  const dwellSeconds = Math.min(Math.max(Math.floor(+body.dwellSeconds || 0), 0), 86400);
+  const maxExchange = Math.min(Math.max(Math.floor(+body.exchange || 0), 0), 1000);
+  const client = clientInfo(req.headers["user-agent"]);
+  const isExit = action === "exit";
+  try {
+    if (!(await ensureSchema())) return res.status(503).json({ error: "analytics unavailable" });
+    await pool.query(`
+      INSERT INTO conversation_funnels (
+        session_id, visitor_id, link_slug, link_domain, exited_at, exit_reason,
+        last_stage, stage_rank, dwell_seconds, max_exchange, ip, device, browser,
+        connected_at, opener_at, first_message_at, first_reply_at,
+        cta_view_at, cta_click_at, converted_at
+      ) VALUES (
+        $1,$2,$3,$4,CASE WHEN $5 THEN now() END,$6,$7,$8,$9,$10,$11,$12,$13,
+        CASE WHEN $7='connected' THEN now() END,
+        CASE WHEN $7='opener_complete' THEN now() END,
+        CASE WHEN $7='first_message' THEN now() END,
+        CASE WHEN $7='first_reply' THEN now() END,
+        CASE WHEN $7='cta_view' THEN now() END,
+        CASE WHEN $7='cta_click' THEN now() END,
+        NULL
+      )
+      ON CONFLICT (session_id) DO UPDATE SET
+        visitor_id=COALESCE(NULLIF(EXCLUDED.visitor_id,''),conversation_funnels.visitor_id),
+        link_slug=COALESCE(NULLIF(EXCLUDED.link_slug,''),conversation_funnels.link_slug),
+        link_domain=COALESCE(NULLIF(EXCLUDED.link_domain,''),conversation_funnels.link_domain),
+        last_seen=now(),
+        exited_at=COALESCE(EXCLUDED.exited_at,conversation_funnels.exited_at),
+        exit_reason=CASE WHEN EXCLUDED.exited_at IS NOT NULL THEN EXCLUDED.exit_reason ELSE conversation_funnels.exit_reason END,
+        last_stage=CASE WHEN EXCLUDED.stage_rank>conversation_funnels.stage_rank THEN EXCLUDED.last_stage ELSE conversation_funnels.last_stage END,
+        stage_rank=GREATEST(EXCLUDED.stage_rank,conversation_funnels.stage_rank),
+        dwell_seconds=GREATEST(EXCLUDED.dwell_seconds,conversation_funnels.dwell_seconds),
+        max_exchange=GREATEST(EXCLUDED.max_exchange,conversation_funnels.max_exchange),
+        ip=COALESCE(NULLIF(EXCLUDED.ip,''),conversation_funnels.ip),
+        device=COALESCE(NULLIF(EXCLUDED.device,''),conversation_funnels.device),
+        browser=COALESCE(NULLIF(EXCLUDED.browser,''),conversation_funnels.browser),
+        connected_at=COALESCE(conversation_funnels.connected_at,EXCLUDED.connected_at),
+        opener_at=COALESCE(conversation_funnels.opener_at,EXCLUDED.opener_at),
+        first_message_at=COALESCE(conversation_funnels.first_message_at,EXCLUDED.first_message_at),
+        first_reply_at=COALESCE(conversation_funnels.first_reply_at,EXCLUDED.first_reply_at),
+        cta_view_at=COALESCE(conversation_funnels.cta_view_at,EXCLUDED.cta_view_at),
+        cta_click_at=COALESCE(conversation_funnels.cta_click_at,EXCLUDED.cta_click_at)`,
+    [
+      sessionID, text(body.visitorID, 100), slugify(body.linkSlug),
+      normalizeHost(body.linkDomain), isExit, isExit ? text(body.reason || "pagehide", 80) : "",
+      stage, rank, dwellSeconds, maxExchange, text(clientIP(req), 80), client.device, client.browser,
+    ]);
+    return res.json({ success: true, stage, rank });
+  } catch (error) {
+    console.warn("funnel update failed:", error.message);
+    return res.status(500).json({ error: "funnel unavailable" });
+  }
+});
+
 // Protected server-to-server conversion postback. Browser beacons cannot mark
 // themselves converted, and external IDs make provider retries idempotent.
 exports.conversion = onRequest(async (req, res) => {
@@ -299,7 +435,25 @@ exports.conversion = onRequest(async (req, res) => {
     );
     if (!externalID) return res.status(400).json({ error: "externalID required" });
     try {
-      const result = await pool.query("DELETE FROM events WHERE type='conversion' AND external_id=$1", [externalID]);
+      const result = await pool.query(
+        "DELETE FROM events WHERE type='conversion' AND external_id=$1 RETURNING session_id",
+        [externalID]
+      );
+      const sessionIDs = result.rows.map((row) => row.session_id).filter(Boolean);
+      if (sessionIDs.length) {
+        await pool.query(`
+          UPDATE conversation_funnels SET
+            converted_at=NULL,
+            stage_rank=CASE
+              WHEN cta_click_at IS NOT NULL THEN 6 WHEN cta_view_at IS NOT NULL THEN 5
+              WHEN first_reply_at IS NOT NULL THEN 4 WHEN first_message_at IS NOT NULL THEN 3
+              WHEN opener_at IS NOT NULL THEN 2 WHEN connected_at IS NOT NULL THEN 1 ELSE 0 END,
+            last_stage=CASE
+              WHEN cta_click_at IS NOT NULL THEN 'cta_click' WHEN cta_view_at IS NOT NULL THEN 'cta_view'
+              WHEN first_reply_at IS NOT NULL THEN 'first_reply' WHEN first_message_at IS NOT NULL THEN 'first_message'
+              WHEN opener_at IS NOT NULL THEN 'opener_complete' WHEN connected_at IS NOT NULL THEN 'connected' ELSE 'landing' END
+          WHERE session_id=ANY($1::text[])`, [sessionIDs]);
+      }
       return res.json({ success: true, deleted: result.rowCount });
     } catch (error) {
       console.warn("conversion delete failed:", error.message);
@@ -330,6 +484,24 @@ exports.conversion = onRequest(async (req, res) => {
       text(body.pathname, 300), text(body.pageURL, 1000), text(body.device, 40), text(body.os, 40),
       text(body.browser, 40), text(body.clickID, 180), JSON.stringify(metadata).slice(0, 4000), externalID,
     ]);
+    const sessionID = text(body.sessionID, 100);
+    if (sessionID) {
+      await pool.query(`
+        INSERT INTO conversation_funnels (
+          session_id,visitor_id,link_slug,link_domain,last_stage,stage_rank,
+          ip,device,browser,converted_at
+        ) VALUES ($1,$2,$3,$4,'conversion',7,$5,$6,$7,now())
+        ON CONFLICT (session_id) DO UPDATE SET
+          visitor_id=COALESCE(NULLIF(EXCLUDED.visitor_id,''),conversation_funnels.visitor_id),
+          link_slug=COALESCE(NULLIF(EXCLUDED.link_slug,''),conversation_funnels.link_slug),
+          link_domain=COALESCE(NULLIF(EXCLUDED.link_domain,''),conversation_funnels.link_domain),
+          last_seen=now(),last_stage='conversion',stage_rank=7,
+          converted_at=COALESCE(conversation_funnels.converted_at,now())`,
+      [
+        sessionID, text(body.visitorID, 100), slug, normalizeHost(body.linkDomain),
+        text(clientIP(req), 80), text(body.device, 40), text(body.browser, 40),
+      ]);
+    }
     return res.status(result.rowCount ? 201 : 200).json({ success: true, duplicate: result.rowCount === 0, externalID });
   } catch (error) {
     console.warn("conversion postback failed:", error.message);
@@ -762,6 +934,100 @@ exports.statsLink = onRequest(async (req, res) => {
   }
 });
 
+exports.statsFunnel = onRequest(async (req, res) => {
+  CORS(res);
+  if (req.method === "OPTIONS") return res.status(204).send("");
+  if (!adminOK(req)) return deny(res);
+  if (!(await ensureSchema())) return res.json({ stages: [], dropoffs: [], recent: [], links: [] });
+
+  const slug = slugify(req.query.slug);
+  const params = [];
+  let where = funnelSinceClause(req.query.range, "f");
+  if (slug) {
+    params.push(slug);
+    where += ` AND f.link_slug=$${params.length}`;
+  }
+  const abandoned = `(f.converted_at IS NULL AND (f.exited_at IS NOT NULL OR f.last_seen < now() - interval '2 minutes'))`;
+  try {
+    const [summaryQ, dropoffsQ, recentQ, linksQ] = await Promise.all([
+      pool.query(`SELECT
+          COUNT(*) AS sessions,
+          COUNT(*) FILTER (WHERE f.stage_rank>=1) AS connected,
+          COUNT(*) FILTER (WHERE f.stage_rank>=2) AS opener_complete,
+          COUNT(*) FILTER (WHERE f.stage_rank>=3) AS first_message,
+          COUNT(*) FILTER (WHERE f.stage_rank>=4) AS first_reply,
+          COUNT(*) FILTER (WHERE f.stage_rank>=5) AS cta_view,
+          COUNT(*) FILTER (WHERE f.stage_rank>=6) AS cta_click,
+          COUNT(*) FILTER (WHERE f.converted_at IS NOT NULL) AS conversion,
+          COUNT(*) FILTER (WHERE ${abandoned}) AS abandoned,
+          COUNT(*) FILTER (WHERE f.converted_at IS NULL AND f.exited_at IS NULL AND f.last_seen >= now() - interval '2 minutes') AS active,
+          COALESCE(AVG(GREATEST(f.dwell_seconds,EXTRACT(EPOCH FROM f.last_seen-f.first_seen))),0) AS avg_dwell
+        FROM conversation_funnels f WHERE ${where}`, params),
+      pool.query(`SELECT f.last_stage AS stage, COUNT(*) AS sessions,
+          COALESCE(AVG(GREATEST(f.dwell_seconds,EXTRACT(EPOCH FROM f.last_seen-f.first_seen))),0) AS avg_dwell
+        FROM conversation_funnels f WHERE ${where} AND ${abandoned}
+        GROUP BY f.last_stage ORDER BY MIN(f.stage_rank)`, params),
+      pool.query(`SELECT f.session_id AS "sessionID",f.link_slug AS "linkSlug",
+          f.first_seen AS "firstSeen",f.last_seen AS "lastSeen",f.last_stage AS "lastStage",
+          f.stage_rank AS "stageRank",f.exit_reason AS "exitReason",f.max_exchange AS "maxExchange",
+          GREATEST(f.dwell_seconds,EXTRACT(EPOCH FROM f.last_seen-f.first_seen))::integer AS "dwellSeconds",
+          CASE WHEN f.converted_at IS NOT NULL THEN 'converted'
+               WHEN f.exited_at IS NOT NULL THEN 'exited'
+               WHEN f.last_seen < now() - interval '2 minutes' THEN 'timed_out'
+               ELSE 'active' END AS status
+        FROM conversation_funnels f WHERE ${where}
+        ORDER BY f.last_seen DESC LIMIT 100`, params),
+      pool.query(`SELECT COALESCE(NULLIF(f.link_slug,''),'unattributed') AS slug,
+          COUNT(*) AS sessions,
+          COUNT(*) FILTER (WHERE f.stage_rank>=3) AS conversations,
+          COUNT(*) FILTER (WHERE f.stage_rank>=5) AS cta_views,
+          COUNT(*) FILTER (WHERE f.stage_rank>=6) AS cta_clicks,
+          COUNT(*) FILTER (WHERE f.converted_at IS NOT NULL) AS conversions
+        FROM conversation_funnels f WHERE ${where}
+        GROUP BY 1 ORDER BY sessions DESC LIMIT 100`, params),
+    ]);
+
+    const summary = summaryQ.rows[0] || {};
+    const ordered = ["landing", "connected", "opener_complete", "first_message", "first_reply", "cta_view", "cta_click", "conversion"];
+    const stages = ordered.map((key, index) => {
+      const count = +(key === "landing" ? summary.sessions : summary[key]) || 0;
+      const previous = index ? +(ordered[index - 1] === "landing" ? summary.sessions : summary[ordered[index - 1]]) || 0 : count;
+      const dropoff = index ? Math.max(0, previous - count) : 0;
+      return {
+        key, label: FUNNEL_LABELS[key], count, dropoff,
+        stepRate: previous ? +(100 * count / previous).toFixed(1) : 0,
+        overallRate: +summary.sessions ? +(100 * count / +summary.sessions).toFixed(1) : 0,
+      };
+    });
+    return res.json({
+      stages,
+      summary: {
+        sessions: +summary.sessions || 0,
+        active: +summary.active || 0,
+        abandoned: +summary.abandoned || 0,
+        avgDwellSeconds: Math.round(+summary.avg_dwell || 0),
+      },
+      dropoffs: dropoffsQ.rows.map((row) => ({
+        stage: row.stage, label: FUNNEL_LABELS[row.stage] || row.stage,
+        sessions: +row.sessions || 0, avgDwellSeconds: Math.round(+row.avg_dwell || 0),
+      })),
+      recent: recentQ.rows,
+      links: linksQ.rows.map((row) => ({
+        ...row,
+        sessions: +row.sessions || 0, conversations: +row.conversations || 0,
+        ctaViews: +row.cta_views || 0, ctaClicks: +row.cta_clicks || 0,
+        conversions: +row.conversions || 0,
+        clickRate: +row.sessions ? +(100 * +row.cta_clicks / +row.sessions).toFixed(1) : 0,
+      })),
+      inactivityWindowSeconds: 120,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.warn("funnel stats failed:", error.message);
+    return res.status(500).json({ error: "funnel analytics unavailable" });
+  }
+});
+
 function csvCell(value) {
   let out = Array.isArray(value) ? value.join("|") : String(value == null ? "" : value);
   if (/^[=+@]/.test(out)) out = `'${out}`;
@@ -797,4 +1063,5 @@ exports.statsExport = onRequest(async (req, res) => {
 
 exports._internal = {
   ensureSchema, slugify, normalizeHost, clientInfo, referrerDomain, countryAccess,
+  funnelSinceClause, FUNNEL_STAGES,
 };

@@ -59,6 +59,7 @@ app.all(["/pixel", "/api/pixel"], publicLimit, handlers.pixel);
 
 // Tracking / analytics (OFMPro-style dashboard backend)
 app.all(["/event", "/api/event"], eventLimit, tracking.trackEvent);
+app.all(["/funnel", "/api/funnel"], eventLimit, tracking.trackFunnel);
 app.all(["/conversion", "/api/conversion"], adminLimit, tracking.conversion);
 app.all(["/link-config", "/api/link-config"], publicLimit, tracking.linkConfig);
 app.all(["/links", "/api/links"], adminLimit, tracking.links);
@@ -68,6 +69,7 @@ app.all(["/stats/links", "/api/stats/links"], adminLimit, tracking.statsLinks);
 app.all(["/stats/events", "/api/stats/events"], adminLimit, tracking.statsEvents);
 app.all(["/stats/geo", "/api/stats/geo"], adminLimit, tracking.statsGeo);
 app.all(["/stats/link", "/api/stats/link"], adminLimit, tracking.statsLink);
+app.all(["/stats/funnel", "/api/stats/funnel"], adminLimit, tracking.statsFunnel);
 app.all(["/stats/export", "/api/stats/export"], adminLimit, tracking.statsExport);
 
 app.get(["/", "/health", "/api/health"], async (_req, res) => {
