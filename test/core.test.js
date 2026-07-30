@@ -42,3 +42,14 @@ test("picture questions stay in chat instead of triggering the CTA", () => {
   assert.equal(chatInternal.messageDeclinesPic("i dont want to send a pic"), true);
   assert.equal(chatInternal.messageTriggersCTA("what's your onlyfans?"), true);
 });
+
+test("split replies remain split without leaving an orphaned second half", () => {
+  assert.deepEqual(
+    chatInternal.filterNovelBubbles(["i'm scared", "of the really scary ones"], []),
+    ["i'm scared", "of the really scary ones"]
+  );
+  assert.deepEqual(
+    chatInternal.filterNovelBubbles(["i'm scared", "of the really scary ones"], ["i'm scared"]),
+    []
+  );
+});

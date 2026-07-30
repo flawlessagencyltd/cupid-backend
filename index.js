@@ -593,9 +593,22 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   // repeats against every Lori line already used in this session and against
   // earlier bubbles in the same response.
   if (!alreadyConverted) {
-    bubbles = filterNovelBubbles(bubbles, usedReplies);
-    if (!bubbles.length) {
-      bubbles = novelRecoveryBubbles(state.exchangeCount, usedReplies);
+    if (replyBeforeAutoCTA) {
+      const ctaIndex = bubbles.findIndex((line) => line.includes(MODEL_CFG.ofLink));
+      const normalPart = ctaIndex >= 0 ? bubbles.slice(0, ctaIndex) : bubbles;
+      const ctaPart = ctaIndex >= 0 ? bubbles.slice(ctaIndex) : ctaCloseBubbles();
+      let novelNormal = filterNovelBubbles(normalPart, usedReplies).slice(0, 2);
+      if (!novelNormal.length) {
+        novelNormal = HOBBY_CONTEXT.test(lastFanMsg?.msg || "")
+          ? ["i don't really have a favorite tbh"]
+          : novelRecoveryBubbles(state.exchangeCount, usedReplies).slice(0, 1);
+      }
+      bubbles = novelNormal.concat(ctaPart);
+    } else {
+      bubbles = filterNovelBubbles(bubbles, usedReplies);
+      if (!bubbles.length) {
+        bubbles = novelRecoveryBubbles(state.exchangeCount, usedReplies);
+      }
     }
   }
 
@@ -729,9 +742,13 @@ function repliesAreSimilar(a, b) {
 function filterNovelBubbles(raw, usedReplies) {
   const accepted = [];
   const previous = Array.isArray(usedReplies) ? usedReplies : [];
+  const leadingFragment = /^\s*(?:and|or|but|of|to|for|with|about|because|that|which|who|when|while|if)\b/i;
   for (const bubble of raw) {
     if (previous.some((old) => repliesAreSimilar(bubble, old))) continue;
     if (accepted.some((old) => repliesAreSimilar(bubble, old))) continue;
+    // Split messages are intentional, but never keep the dependent second half
+    // when repetition filtering removed the first half.
+    if (!accepted.length && leadingFragment.test(bubble)) continue;
     accepted.push(bubble);
   }
   // Multiple question bubbles usually restate the same conversational ask
@@ -874,4 +891,5 @@ exports.pixel = onRequest((req, res) => {
 
 exports._internal = {
   messageRequestsPic, messageAsksWhyPic, messageDeclinesPic, messageTriggersCTA,
+  filterNovelBubbles,
 };
