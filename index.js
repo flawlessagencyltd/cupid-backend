@@ -448,6 +448,9 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   // The frontend marks the proactive opening request as a follow-up with no fan
   // messages. Keep this beat deterministic: opener snap first, then one exact ask.
   const isFirstReply = state.exchangeCount === 0 && b.isFollowUp === true;
+  // After the fan answers the opener for the first time, Lori sends one more
+  // photo after her text response. CTA turns keep only their spiciest final pic.
+  const isFirstFanResponse = state.exchangeCount === 1 && b.isFollowUp !== true;
 
   // Did the fan SEND a pic? Frontend passes it as b.image (base64/URL). Vision
   // model describes it so Lori reacts to what she actually saw, not a canned line.
@@ -588,21 +591,22 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   }));
 
   // Snap beats — pick the right photo for where the convo is:
-  //  1. verify: he called her fake/bot → proof pic (beats everything else)
-  //  2. opener: brand-new convo → her hello snap lands BEFORE the "hi" text
-  //  3. pic request: escalate casual early → spicy as exchanges build
+  //  1. opener: brand-new convo → her hello snap lands BEFORE the "hi" text
+  //  2. first fan response → one casual/verification snap AFTER Lori's text
+  //  3. later verification/requested snaps lead the text response
   //  4. CTA: the spiciest pic lands AFTER every CTA/disconnect bubble
   const wantVerify = !!(lastFanMsg && VERIFY_REQUEST.test(lastFanMsg.msg || ""));
 
   const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const mediaOpt = (pool) => ({ ...pool, isIncoming: false, type: "media", mediaType: "image", style: "snap", timestamp: now });
 
-  // Opener/verification/requested snaps lead the text response. The CTA snap is
-  // intentionally different: it is appended after the final leaving bubble.
-  if (wantVerify && !wantCTA) {
-    options.unshift(mediaOpt(pick(MEDIA_POOLS.verify)));
-  } else if (isFirstReply) {
+  if (isFirstReply) {
     options.unshift(mediaOpt(MEDIA_POOLS.opener));
+  } else if (isFirstFanResponse && !wantCTA) {
+    const firstResponsePool = wantVerify ? MEDIA_POOLS.verify : MEDIA_POOLS.casual;
+    options.push(mediaOpt(pick(firstResponsePool)));
+  } else if (wantVerify && !wantCTA) {
+    options.unshift(mediaOpt(pick(MEDIA_POOLS.verify)));
   } else if (wantPic && !wantCTA) {
     const tier = state.exchangeCount >= PHASES[1].minExchanges ? MEDIA_POOLS.spicy : MEDIA_POOLS.casual;
     options.unshift(mediaOpt(pick(tier)));
