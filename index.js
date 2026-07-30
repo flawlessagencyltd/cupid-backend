@@ -547,8 +547,10 @@ exports.chat = onRequest({ secrets: [OPENROUTER_KEY] }, async (req, res) => {
   // Do not let Lori manufacture a shared hobby just because the fan mentioned
   // one. She can stay curious without claiming she likes the same thing.
   if ((!wantCTA || replyBeforeAutoCTA) && lastFanMsg && HOBBY_CONTEXT.test(lastFanMsg.msg || "")) {
-    const grounded = bubbles.filter((line) => !CLAIMS_SHARED_HOBBY.test(line));
-    bubbles = grounded.length ? grounded : ["tell me more about that 👀"];
+    const grounded = bubbles
+      .filter((line) => !CLAIMS_SHARED_HOBBY.test(line))
+      .filter((line) => !/^\s*(?:and|or|but)\b/i.test(line));
+    bubbles = grounded.length ? grounded : ["i don't really have a favorite tbh"];
   }
 
   // A scheduled CTA should not ignore the message that happened to hit the
