@@ -21,3 +21,14 @@ test("automated user agents are flagged", () => {
   assert.equal(info.verdict, "flagged");
   assert.ok(info.flags.includes("automated_user_agent"));
 });
+
+test("country exclusions are normalized and can use a recovery URL", () => {
+  assert.deepEqual(_internal.countryAccess(["gb", "DE"], "GB", "https://example.com/recover"), {
+    blocked: true,
+    country: "GB",
+    reason: "excluded_country",
+    recoveryURL: "https://example.com/recover",
+  });
+  assert.equal(_internal.countryAccess(["GB"], "US").blocked, false);
+  assert.equal(_internal.countryAccess(["GB"], "").blocked, false);
+});

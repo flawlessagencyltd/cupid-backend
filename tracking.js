@@ -55,6 +55,18 @@ function stringArray(value, maxItems = 30, maxLen = 80) {
   return [...new Set(raw.map((x) => text(x, maxLen)).filter(Boolean))].slice(0, maxItems);
 }
 
+function countryAccess(excludedCountries, country, recoveryURL = "") {
+  const code = text(country, 2).toUpperCase();
+  const excluded = new Set(stringArray(excludedCountries, 100, 2).map((x) => x.toUpperCase()));
+  const blocked = !!code && excluded.has(code);
+  return {
+    blocked,
+    country: code,
+    reason: blocked ? "excluded_country" : "",
+    recoveryURL: blocked ? validDestination(recoveryURL) : "",
+  };
+}
+
 function referrerDomain(value) {
   if (!value) return "Direct";
   try { return new URL(value).hostname.replace(/^www\./, "") || "Direct"; }
@@ -223,12 +235,24 @@ exports.trackEvent = onRequest(async (req, res) => {
   const ua = text(req.headers["user-agent"], 500);
   const client = clientInfo(ua);
   const geo = await lookupGeo(req);
+  const linkSlug = slugify(body.linkSlug);
+  let verdict = client.verdict;
+  const securityFlags = [...client.flags];
   const clickID = text(body.clickID || body.fbclid || body.gclid || body.ttclid, 180);
   const metadata = body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
     ? body.metadata : {};
 
   if (await ensureSchema()) {
     try {
+      if (type === "view" && linkSlug && geo.country) {
+        const { rows } = await pool.query(
+          `SELECT excluded_countries AS "excludedCountries" FROM links
+           WHERE slug=$1 AND active=true LIMIT 1`, [linkSlug]);
+        if (countryAccess(rows[0]?.excludedCountries, geo.country).blocked) {
+          verdict = "blocked";
+          if (!securityFlags.includes("excluded_country")) securityFlags.push("excluded_country");
+        }
+      }
       await pool.query(
         `INSERT INTO events (
            type, link_slug, session_id, visitor_id, ip, country, city, ua,
@@ -240,11 +264,11 @@ exports.trackEvent = onRequest(async (req, res) => {
            $18,$19,$20,$21,$22,$23,$24
          )`,
         [
-          type, slugify(body.linkSlug), text(body.sessionID, 100), text(body.visitorID, 100),
+          type, linkSlug, text(body.sessionID, 100), text(body.visitorID, 100),
           ip, geo.country || "", geo.city || "", ua,
           text(body.referrer || req.headers.referer, 1000), normalizeHost(body.linkDomain),
           text(body.pathname, 300), text(body.pageURL, 1000), client.device, client.os,
-          client.browser, client.verdict, client.flags,
+          client.browser, verdict, securityFlags,
           text(body.utmSource, 120), text(body.utmMedium, 120), text(body.utmCampaign, 160),
           text(body.utmContent, 160), text(body.utmTerm, 160), clickID,
           JSON.stringify(metadata).slice(0, 4000),
@@ -327,9 +351,14 @@ exports.linkConfig = onRequest(async (req, res) => {
       SELECT slug, name, destination, recovery_url AS "recoveryURL",
              google_analytics_id AS "googleAnalyticsID",
              facebook_pixel_id AS "facebookPixelID",
-             tiktok_pixel_id AS "tiktokPixelID", deeplinking
+             tiktok_pixel_id AS "tiktokPixelID", deeplinking,
+             excluded_countries AS "excludedCountries"
       FROM links WHERE slug = $1 AND active = true LIMIT 1`, [slug]);
-    return res.json({ link: link || null });
+    if (!link) return res.json({ link: null, access: { blocked: false } });
+    const geo = await lookupGeo(req);
+    const access = countryAccess(link.excludedCountries, geo.country, link.recoveryURL);
+    delete link.excludedCountries;
+    return res.json({ link, access });
   } catch (error) {
     console.warn("link config failed:", error.message);
     return res.json({ link: null });
@@ -767,5 +796,5 @@ exports.statsExport = onRequest(async (req, res) => {
 });
 
 exports._internal = {
-  ensureSchema, slugify, normalizeHost, clientInfo, referrerDomain,
+  ensureSchema, slugify, normalizeHost, clientInfo, referrerDomain, countryAccess,
 };
